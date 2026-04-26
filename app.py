@@ -1,9 +1,11 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import pickle
 import json
+from datetime import datetime
 
 # ====================== CONFIG ======================
 
@@ -40,7 +42,7 @@ p, label {
     color: #1F2933 !important;
 }
 
-/* CAPTION */
+/* MARKDOWN + TABLEAUX */
 [data-testid="stMarkdownContainer"] * {
     color: #1F2933 !important;
 }
@@ -48,6 +50,7 @@ p, label {
 [data-testid="stDataFrame"] * {
     color: inherit !important;
 }
+
 /* HEADER */
 .eco-header {
     background: white;
@@ -92,11 +95,6 @@ button[data-baseweb="tab"][aria-selected="true"] {
     background-color: #66B32E !important;
 }
 
-/* INPUTS */
-input, textarea, select {
-    color: #1F2933 !important;
-}
-
 /* ALERTES */
 [data-testid="stAlert"] * {
     color: #1F2933 !important;
@@ -131,6 +129,7 @@ input, textarea, select {
     color: #1F2933 !important;
     margin-top: 8px;
 }
+
 /* CORRECTION BOUTONS SIDEBAR */
 [data-testid="stSidebar"] .stButton > button {
     background: #FFFFFF !important;
@@ -147,10 +146,11 @@ input, textarea, select {
 [data-testid="stSidebar"] .stButton > button * {
     color: inherit !important;
 }
+
 /* INPUT LOGIN / TEXT INPUT */
-input[type="text"], 
-input[type="password"], 
-textarea, 
+input[type="text"],
+input[type="password"],
+textarea,
 select {
     background-color: #FFFFFF !important;
     color: #1F2933 !important;
@@ -166,6 +166,7 @@ input:focus, textarea:focus, select:focus {
 ::placeholder {
     color: #9CA3AF !important;
 }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -205,7 +206,7 @@ def save_users(users):
         json.dump(users, f, indent=4, ensure_ascii=False)
 
 
-# ====================== FONCTIONS ======================
+# ====================== FONCTIONS DESIGN ======================
 
 def card(title, value):
     st.markdown(f"""
@@ -215,6 +216,8 @@ def card(title, value):
     </div>
     """, unsafe_allow_html=True)
 
+
+# ====================== FONCTIONS OUTILS ======================
 
 def normalize_key(s):
     if pd.isna(s):
@@ -359,6 +362,118 @@ def list_periodes():
     return sorted([f.stem for f in HISTORIQUE_DIR.glob("*.pkl")])
 
 
+# ====================== FONCTIONS PÉRIODES / ANNUEL ======================
+
+MOIS_FR = {
+    "JANVIER": 1,
+    "FEVRIER": 2,
+    "FÉVRIER": 2,
+    "MARS": 3,
+    "AVRIL": 4,
+    "MAI": 5,
+    "JUIN": 6,
+    "JUILLET": 7,
+    "AOUT": 8,
+    "AOÛT": 8,
+    "SEPTEMBRE": 9,
+    "OCTOBRE": 10,
+    "NOVEMBRE": 11,
+    "DECEMBRE": 12,
+    "DÉCEMBRE": 12,
+}
+
+
+def periode_to_month_year(periode):
+    if not periode:
+        return None, None
+
+    parts = str(periode).strip().upper().split()
+
+    if len(parts) < 2:
+        return None, None
+
+    mois = MOIS_FR.get(parts[0])
+    annee = None
+
+    for p in parts[1:]:
+        if p.isdigit() and len(p) == 4:
+            annee = int(p)
+            break
+
+    return mois, annee
+
+
+def periode_sort_key(periode):
+    mois, annee = periode_to_month_year(periode)
+    return (annee or 0, mois or 0)
+
+
+def is_periode_comptable_annuelle(periode, annee_selectionnee, use_m2=True):
+    mois, annee = periode_to_month_year(periode)
+
+    if not mois or not annee:
+        return False
+
+    if annee != annee_selectionnee:
+        return False
+
+    if not use_m2:
+        return True
+
+    today = datetime.today()
+
+    if annee < today.year:
+        return True
+
+    if annee > today.year:
+        return False
+
+    return mois <= today.month - 2
+
+
+def load_all_historique():
+    rows_vendeurs = []
+    rows_agences = []
+    rows_directeurs = []
+
+    for periode in list_periodes():
+        data = load_periode(periode)
+
+        if not data:
+            continue
+
+        mois, annee = periode_to_month_year(periode)
+
+        if "df_vendeurs" in data and isinstance(data["df_vendeurs"], pd.DataFrame):
+            dfv = data["df_vendeurs"].copy()
+            dfv["periode"] = periode
+            dfv["mois_num"] = mois
+            dfv["annee"] = annee
+            rows_vendeurs.append(dfv)
+
+        if "df_agences" in data and isinstance(data["df_agences"], pd.DataFrame):
+            dfa = data["df_agences"].copy()
+            dfa["periode"] = periode
+            dfa["mois_num"] = mois
+            dfa["annee"] = annee
+            rows_agences.append(dfa)
+
+        if "df_directeurs" in data and isinstance(data["df_directeurs"], pd.DataFrame):
+            dfd = data["df_directeurs"].copy()
+            dfd["periode"] = periode
+            dfd["mois_num"] = mois
+            dfd["annee"] = annee
+            rows_directeurs.append(dfd)
+
+    df_all_vendeurs = pd.concat(rows_vendeurs, ignore_index=True) if rows_vendeurs else pd.DataFrame()
+    df_all_agences = pd.concat(rows_agences, ignore_index=True) if rows_agences else pd.DataFrame()
+    df_all_directeurs = pd.concat(rows_directeurs, ignore_index=True) if rows_directeurs else pd.DataFrame()
+
+    return df_all_vendeurs, df_all_agences, df_all_directeurs
+
+
+# ====================== FORMAT TABLEAUX ======================
+
 def format_df_vendeurs(df):
     if df.empty:
         return df
@@ -435,12 +550,12 @@ role = user["role"]
 
 st.markdown('<div class="eco-header">', unsafe_allow_html=True)
 
-col1, col2 = st.columns([1,6])
+col1, col2 = st.columns([1, 6])
 
 with col1:
     try:
         st.image("logo.png", width=90)
-    except:
+    except Exception:
         st.markdown("🏠")
 
 with col2:
@@ -463,12 +578,26 @@ if st.sidebar.button("🚪 Déconnexion"):
     st.rerun()
 
 
+# ====================== PARAMÈTRES TEST ======================
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ Paramètres")
+
+use_m2_rule = st.sidebar.checkbox(
+    "Activer règle M-2",
+    value=True
+)
+
+if not use_m2_rule:
+    st.sidebar.warning("⚠️ Mode TEST : règle M-2 désactivée")
+
+
 # ====================== SIDEBAR HISTORIQUE ======================
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📂 Historique")
 
-periodes_dispo = list_periodes()
+periodes_dispo = sorted(list_periodes(), key=periode_sort_key)
 
 periode_load = st.sidebar.selectbox(
     "Charger une période sauvegardée",
@@ -916,6 +1045,194 @@ def afficher_admin_users():
                 st.rerun()
 
 
+# ====================== AFFICHAGE ANNUEL ======================
+
+def afficher_annuel(tab):
+    with tab:
+        st.subheader("📆 Analyse annuelle")
+
+        df_all_vendeurs, df_all_agences, df_all_directeurs = load_all_historique()
+
+        if df_all_vendeurs.empty and df_all_agences.empty:
+            st.info("Aucune période historique disponible pour construire l’analyse annuelle.")
+            return
+
+        annees_detectees = []
+        for df_src in [df_all_vendeurs, df_all_agences]:
+            if not df_src.empty and "annee" in df_src.columns:
+                annees_detectees += [int(a) for a in df_src["annee"].dropna().unique()]
+
+        annees = sorted(set(annees_detectees))
+
+        if not annees:
+            st.warning("Impossible de détecter les années depuis les périodes sauvegardées. Utilise un format du type : Avril 2026.")
+            return
+
+        default_year = datetime.today().year if datetime.today().year in annees else max(annees)
+
+        annee_selectionnee = st.selectbox(
+            "Année analysée",
+            annees,
+            index=annees.index(default_year)
+        )
+
+        periodes_comptables = [
+            p for p in sorted(list_periodes(), key=periode_sort_key)
+            if is_periode_comptable_annuelle(p, annee_selectionnee, use_m2_rule)
+        ]
+
+        if periodes_comptables:
+            if use_m2_rule:
+                st.caption("Mois comptabilisés selon la règle M-2 : " + ", ".join(periodes_comptables))
+            else:
+                st.warning("⚠️ Mode TEST actif : toutes les périodes de l’année sélectionnée sont comptabilisées.")
+                st.caption("Mois comptabilisés : " + ", ".join(periodes_comptables))
+        else:
+            st.warning("Aucun mois comptabilisable pour cette année.")
+            return
+
+        df_v = df_all_vendeurs[
+            df_all_vendeurs["periode"].isin(periodes_comptables)
+        ].copy() if not df_all_vendeurs.empty else pd.DataFrame()
+
+        df_a = df_all_agences[
+            df_all_agences["periode"].isin(periodes_comptables)
+        ].copy() if not df_all_agences.empty else pd.DataFrame()
+
+        if role == "vendeur":
+            df_v = df_v[
+                df_v["Commercial"].apply(normalize_key) == normalize_key(user["nom"])
+            ].copy() if not df_v.empty else pd.DataFrame()
+            df_a = pd.DataFrame()
+
+        elif role == "directeur_agence":
+            df_v = df_v[
+                df_v["Commercial"].apply(normalize_key) == normalize_key(user["nom"])
+            ].copy() if not df_v.empty else pd.DataFrame()
+
+            if not df_a.empty:
+                df_a = df_a[
+                    df_a["agence"].apply(normalize_key) == normalize_key(user["agence"])
+                ].copy()
+
+        total_ok_annuel = df_v["ca_ok"].sum() if not df_v.empty and "ca_ok" in df_v.columns else 0
+        total_commissions_annuel = df_v["commission_eur"].sum() if not df_v.empty and "commission_eur" in df_v.columns else 0
+        total_agence_ok_annuel = df_a["ca_ok"].sum() if not df_a.empty and "ca_ok" in df_a.columns else 0
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            card("✅ CA OK vendeurs annuel", f"{total_ok_annuel:,.2f} €")
+
+        with c2:
+            card("💰 Commissions vendeurs", f"{total_commissions_annuel:,.2f} €")
+
+        with c3:
+            card("🏢 CA OK agences annuel", f"{total_agence_ok_annuel:,.2f} €")
+
+        st.divider()
+
+        if not df_v.empty:
+            df_classement_vendeurs = (
+                df_v
+                .groupby("Commercial", as_index=False)
+                .agg({
+                    "ca_ok": "sum",
+                    "commission_eur": "sum"
+                })
+                .sort_values("ca_ok", ascending=False)
+                .reset_index(drop=True)
+            )
+
+            df_classement_vendeurs.insert(0, "Rang", range(1, len(df_classement_vendeurs) + 1))
+
+            st.subheader("🏆 Classement annuel vendeurs — CA OK")
+            st.dataframe(
+                df_classement_vendeurs.rename(columns={
+                    "ca_ok": "CA OK annuel",
+                    "commission_eur": "Commission annuelle"
+                }),
+                use_container_width=True
+            )
+
+            df_mensuel_vendeurs = (
+                df_v
+                .groupby(["periode", "mois_num"], as_index=False)
+                .agg({
+                    "ca_ok": "sum",
+                    "commission_eur": "sum"
+                })
+                .sort_values("mois_num")
+            )
+
+            st.subheader("📈 Évolution mensuelle vendeurs")
+            st.dataframe(
+                df_mensuel_vendeurs.rename(columns={
+                    "periode": "Période",
+                    "ca_ok": "CA OK",
+                    "commission_eur": "Commission"
+                }).drop(columns=["mois_num"], errors="ignore"),
+                use_container_width=True
+            )
+        else:
+            st.info("Aucune donnée vendeur pour cette analyse annuelle.")
+
+        if role in ["admin", "directeur_agence"]:
+            st.divider()
+
+            if not df_a.empty:
+                df_classement_agences = (
+                    df_a
+                    .groupby("agence", as_index=False)
+                    .agg({
+                        "ca_ok": "sum",
+                        "ca_magasin_ok": "sum",
+                        "nb_ok": "sum",
+                        "nb_total": "sum"
+                    })
+                    .sort_values("ca_ok", ascending=False)
+                    .reset_index(drop=True)
+                )
+
+                df_classement_agences.insert(0, "Rang", range(1, len(df_classement_agences) + 1))
+
+                st.subheader("🏢 Classement annuel agences — CA OK")
+                st.dataframe(
+                    df_classement_agences.rename(columns={
+                        "agence": "Agence",
+                        "ca_ok": "CA OK annuel",
+                        "ca_magasin_ok": "CA magasin OK annuel",
+                        "nb_ok": "Nb affaires OK",
+                        "nb_total": "Nb affaires total"
+                    }),
+                    use_container_width=True
+                )
+
+                df_mensuel_agences = (
+                    df_a
+                    .groupby(["periode", "mois_num"], as_index=False)
+                    .agg({
+                        "ca_ok": "sum",
+                        "ca_magasin_ok": "sum",
+                        "nb_ok": "sum"
+                    })
+                    .sort_values("mois_num")
+                )
+
+                st.subheader("📈 Évolution mensuelle agences")
+                st.dataframe(
+                    df_mensuel_agences.rename(columns={
+                        "periode": "Période",
+                        "ca_ok": "CA OK",
+                        "ca_magasin_ok": "CA magasin OK",
+                        "nb_ok": "Nb affaires OK"
+                    }).drop(columns=["mois_num"], errors="ignore"),
+                    use_container_width=True
+                )
+            else:
+                st.info("Aucune donnée agence pour cette analyse annuelle.")
+
+
 # ====================== AFFICHAGE DONNÉES ======================
 
 if st.session_state.get("df_vendeurs") is not None:
@@ -976,6 +1293,7 @@ if st.session_state.get("df_vendeurs") is not None:
     if role == "admin":
         tabs = st.tabs([
             "📊 Dashboard",
+            "📆 Annuel",
             "👤 Par Vendeur",
             "🏢 Par Agence",
             "👔 Directeurs",
@@ -986,13 +1304,15 @@ if st.session_state.get("df_vendeurs") is not None:
     elif role == "directeur_agence":
         tabs = st.tabs([
             "👤 Mes chiffres",
+            "📆 Annuel",
             "🏢 Mon agence",
             "👔 Commission agence"
         ])
 
     else:
         tabs = st.tabs([
-            "👤 Mes chiffres"
+            "👤 Mes chiffres",
+            "📆 Annuel"
         ])
 
     # ====================== FONCTIONS AFFICHAGE ======================
@@ -1069,32 +1389,141 @@ if st.session_state.get("df_vendeurs") is not None:
             detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
 
             if not detail.empty:
+                col_client = st.session_state.col_client
+                col_doc = st.session_state.col_doc
+                col_date = st.session_state.col_date
+                col_agence = st.session_state.col_agence
+                col_vente = st.session_state.col_vente
+                col_ca_magasin = st.session_state.col_ca_magasin
+                col_catalogue = st.session_state.col_catalogue
+                col_rem = st.session_state.col_rem
+                col_op = st.session_state.col_op
+
+                detail_calc = detail.copy()
+
+                for c in [col_vente, col_ca_magasin, col_catalogue, col_rem]:
+                    if c and c in detail_calc.columns:
+                        detail_calc[c] = pd.to_numeric(detail_calc[c], errors="coerce").fillna(0)
+
+                def count_vendeurs_row(row):
+                    nb = 0
+                    for c in colonnes_commerciaux:
+                        if c and c in row.index and clean_visible(row.get(c)):
+                            nb += 1
+                    return max(nb, 1)
+
+                detail_calc["Nombre de vendeurs"] = detail_calc.apply(count_vendeurs_row, axis=1)
+
+                if col_catalogue and col_catalogue in detail_calc.columns and col_rem and col_rem in detail_calc.columns:
+                    detail_calc["Remise %"] = np.where(
+                        detail_calc[col_catalogue] > 0,
+                        detail_calc[col_rem] / detail_calc[col_catalogue] * 100,
+                        0
+                    )
+                else:
+                    detail_calc["Remise %"] = 0
+
+                # Bonus / Malus par dossier :
+                # base théorique = Total ventes avant remise avec 15 % de remise, réparti par nombre de vendeurs.
+                # règle OPC : les remises OPC ne comptent pas dans la remise moyenne ;
+                # pour le bonus/malus, on neutralise les malus OPC mais on conserve les bonus éventuels.
+                if col_catalogue and col_catalogue in detail_calc.columns and col_vente and col_vente in detail_calc.columns:
+                    objectif_15_par_vendeur = (detail_calc[col_catalogue] * 0.85) / detail_calc["Nombre de vendeurs"]
+                    detail_calc["Bonus / Malus"] = detail_calc[col_vente] - objectif_15_par_vendeur
+                else:
+                    detail_calc["Bonus / Malus"] = 0
+
+                if col_op and col_op in detail_calc.columns:
+                    opc_mask = detail_calc.apply(lambda row: is_opc(row, col_op), axis=1)
+                    detail_calc.loc[opc_mask & (detail_calc["Bonus / Malus"] < 0), "Bonus / Malus"] = 0
+                    detail_calc["OPC"] = np.where(opc_mask, "OUI", "")
+                else:
+                    opc_mask = pd.Series(False, index=detail_calc.index)
+                    detail_calc["OPC"] = ""
+
+                remise_total_hors_opc = 0
+                if col_catalogue and col_catalogue in detail_calc.columns and col_rem and col_rem in detail_calc.columns:
+                    base_hors_opc = detail_calc.loc[~opc_mask, col_catalogue].sum()
+                    rem_hors_opc = detail_calc.loc[~opc_mask, col_rem].sum()
+                    remise_total_hors_opc = (rem_hors_opc / base_hors_opc * 100) if base_hors_opc > 0 else 0
+
+                bonus_malus_valides = detail_calc.loc[
+                    detail_calc["Statut"].astype(str).str.contains("OK", case=False, na=False),
+                    "Bonus / Malus"
+                ].sum()
+
+                bonus_malus_global = detail_calc["Bonus / Malus"].sum()
+
+                c_bonus1, c_bonus2, c_bonus3 = st.columns(3)
+                with c_bonus1:
+                    card("📉 Remise moyenne hors OPC", f"{remise_total_hors_opc:,.2f} %")
+                with c_bonus2:
+                    card("✅ Bonus / Malus validés", f"{bonus_malus_valides:,.2f} €")
+                with c_bonus3:
+                    card("📊 Bonus / Malus global", f"{bonus_malus_global:,.2f} €")
+
                 cols_show = [
-                    st.session_state.col_client,
-                    st.session_state.col_doc,
-                    st.session_state.col_date,
+                    col_client,
+                    col_doc,
+                    col_date,
                     "Statut",
-                    st.session_state.col_agence,
-                    st.session_state.col_vente,
-                    st.session_state.col_ca_magasin,
-                    st.session_state.col_catalogue,
-                    st.session_state.col_rem,
-                    st.session_state.col_op
+                    col_agence,
+                    col_vente,
+                    col_ca_magasin,
+                    "Remise %",
+                    "OPC",
+                    "Bonus / Malus"
                 ]
 
-                cols_show = list(dict.fromkeys([c for c in cols_show if c and c in detail.columns]))
-                detail_affichage = detail[cols_show].copy()
+                cols_show = list(dict.fromkeys([c for c in cols_show if c and c in detail_calc.columns]))
+                detail_affichage = detail_calc[cols_show].copy()
 
-                for c in [
-                    st.session_state.col_vente,
-                    st.session_state.col_ca_magasin,
-                    st.session_state.col_catalogue,
-                    st.session_state.col_rem
-                ]:
-                    if c and c in detail_affichage.columns:
+                rename_detail_cols = {}
+                if col_client:
+                    rename_detail_cols[col_client] = "Client / Référence affaire"
+                if col_doc:
+                    rename_detail_cols[col_doc] = "N° Document"
+                if col_date:
+                    rename_detail_cols[col_date] = "Date document"
+                if col_agence:
+                    rename_detail_cols[col_agence] = "Agence"
+                if col_vente:
+                    rename_detail_cols[col_vente] = "TOTAL VENTE"
+                if col_ca_magasin:
+                    rename_detail_cols[col_ca_magasin] = "Vente HT hors acompte"
+
+                detail_affichage = detail_affichage.rename(columns=rename_detail_cols)
+
+                for c in ["TOTAL VENTE", "Vente HT hors acompte", "Remise %", "Bonus / Malus"]:
+                    if c in detail_affichage.columns:
                         detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
 
-                st.dataframe(detail_affichage, use_container_width=True, height=600)
+                def color_bonus_malus(val):
+                    try:
+                        v = float(val)
+                    except Exception:
+                        return ""
+                    if v > 0:
+                        return "background-color: #D1FADF; color: #065F46; font-weight: 700"
+                    if v < 0:
+                        return "background-color: #FECACA; color: #991B1B; font-weight: 700"
+                    return ""
+
+                styled_detail = (
+                    detail_affichage.style
+                    .map(
+                        color_bonus_malus,
+                        subset=["Bonus / Malus"] if "Bonus / Malus" in detail_affichage.columns else []
+                    )
+                    .format({
+                        "TOTAL VENTE": "{:,.2f} €",
+                        "Vente HT hors acompte": "{:,.2f} €",
+                        "Remise %": "{:.2f} %",
+                        "Bonus / Malus": "{:,.2f} €",
+                    })
+                )
+
+                st.dataframe(styled_detail, use_container_width=True, height=600)
             else:
                 st.info("Aucune affaire trouvée pour ce vendeur.")
 
@@ -1210,7 +1639,7 @@ if st.session_state.get("df_vendeurs") is not None:
             c1, c2, c3, c4, c5 = st.columns(5)
 
             with c1:
-                card("✅CA OK vendeurs", f"{total_ok:,.2f} €")
+                card("✅ CA OK vendeurs", f"{total_ok:,.2f} €")
 
             with c2:
                 card("⏳ CA attente vendeurs", f"{total_attente:,.2f} €")
@@ -1228,7 +1657,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
             st.subheader("🏆 Classement vendeurs")
             st.dataframe(
-                format_df_vendeurs(df_vendeurs).sort_values("Commission €", ascending=False).reset_index(drop=True),
+                format_df_vendeurs(df_vendeurs).sort_values("CA OK", ascending=False).reset_index(drop=True),
                 use_container_width=True
             )
 
@@ -1239,10 +1668,11 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        afficher_vendeur(tabs[1])
-        afficher_agence(tabs[2])
+        afficher_annuel(tabs[1])
+        afficher_vendeur(tabs[2])
+        afficher_agence(tabs[3])
 
-        with tabs[3]:
+        with tabs[4]:
             if df_directeurs.empty:
                 st.info("Aucune commission magasin calculée.")
             else:
@@ -1251,9 +1681,9 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        with tabs[4]:
+        with tabs[5]:
             st.subheader("👤 Vendeurs")
-            st.dataframe(format_df_vendeurs(df_vendeurs).sort_values("Commission €", ascending=False), use_container_width=True)
+            st.dataframe(format_df_vendeurs(df_vendeurs).sort_values("CA OK", ascending=False), use_container_width=True)
 
             st.subheader("🏢 Agences")
             if not df_agences.empty:
@@ -1263,14 +1693,15 @@ if st.session_state.get("df_vendeurs") is not None:
             if not df_directeurs.empty:
                 st.dataframe(format_df_directeurs(df_directeurs).sort_values("Commission magasin €", ascending=False), use_container_width=True)
 
-        with tabs[5]:
+        with tabs[6]:
             afficher_admin_users()
 
     elif role == "directeur_agence":
         afficher_vendeur(tabs[0], vendeur_forced=user["nom"])
-        afficher_agence(tabs[1], agence_forced=user["agence"])
+        afficher_annuel(tabs[1])
+        afficher_agence(tabs[2], agence_forced=user["agence"])
 
-        with tabs[2]:
+        with tabs[3]:
             if df_directeurs.empty:
                 st.info("Aucune commission agence disponible.")
             else:
@@ -1278,6 +1709,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
     elif role == "vendeur":
         afficher_vendeur(tabs[0], vendeur_forced=user["nom"])
+        afficher_annuel(tabs[1])
 
     # ====================== EXPORTS ADMIN ======================
 
@@ -1303,6 +1735,11 @@ else:
         st.info("Ou charge les fichiers CONFIRM / BONLIVR puis clique sur « Lancer le traitement ».")
 
         st.divider()
-        afficher_admin_users()
 
-st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence • Design EcoHabitat")
+        tabs_empty = st.tabs(["📆 Annuel", "⚙️ Utilisateurs"])
+        afficher_annuel(tabs_empty[0])
+
+        with tabs_empty[1]:
+            afficher_admin_users()
+
+st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence • Design EcoHabitat • Analyse annuelle M-2")
