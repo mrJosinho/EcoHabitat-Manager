@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 import pickle
 import json
+import base64
 from datetime import datetime
 
 # ====================== CONFIG ======================
@@ -232,6 +233,14 @@ def clean_visible(s):
     return " ".join(str(s).replace(chr(160), " ").split()).strip()
 
 
+def to_float(value, default=0.0):
+    try:
+        value = pd.to_numeric(value, errors="coerce")
+    except Exception:
+        return default
+    return default if pd.isna(value) else float(value)
+
+
 def is_excluded_from_evp(nom):
     k = normalize_key(nom)
     return k in [
@@ -318,6 +327,214 @@ def vendeur_mask(df, vendeur, colonnes_commerciaux):
     return mask
 
 
+def count_vendeurs_row(row, colonnes_commerciaux):
+    nb = 0
+    for col in colonnes_commerciaux:
+        if col and col in row.index and clean_visible(row.get(col)):
+            nb += 1
+    return max(nb, 1)
+
+
+def calculate_bonus_malus_row(row, col_vente, col_catalogue, col_op, colonnes_commerciaux):
+    if not col_vente or col_vente not in row.index or not col_catalogue or col_catalogue not in row.index:
+        return 0.0
+
+    vente = pd.to_numeric(row.get(col_vente), errors="coerce")
+    vente = float(vente) if pd.notna(vente) else 0.0
+
+    catalogue = pd.to_numeric(row.get(col_catalogue), errors="coerce")
+    catalogue = float(catalogue) if pd.notna(catalogue) else 0.0
+
+    objectif_15_par_vendeur = (catalogue * 0.85) / count_vendeurs_row(row, colonnes_commerciaux)
+    bonus_malus = vente - objectif_15_par_vendeur
+
+    if is_opc(row, col_op) and bonus_malus < 0:
+        return 0.0
+
+    return bonus_malus
+
+
+def calculate_bonus_malus_by_vendor(df_ok, df_c, col_vente, col_catalogue, col_op, colonnes_commerciaux, key_cols):
+    bonus_malus = {}
+
+    def add_to_vendor(row, target_cols):
+        montant = calculate_bonus_malus_row(row, col_vente, col_catalogue, col_op, colonnes_commerciaux)
+
+        for col in colonnes_commerciaux:
+            if not col or col not in row.index:
+                continue
+
+            nom = clean_visible(row.get(col))
+            if not nom:
+                continue
+
+            k = normalize_key(nom)
+            if k not in bonus_malus:
+                bonus_malus[k] = {
+                    "bonus_malus_ok": 0.0,
+                    "bonus_malus_global": 0.0
+                }
+
+            for target_col in target_cols:
+                bonus_malus[k][target_col] += montant
+
+    if not df_c.empty:
+        for _, row in df_c.iterrows():
+            add_to_vendor(row, ["bonus_malus_global"])
+
+    if not df_ok.empty:
+        for _, row in df_ok.iterrows():
+            add_to_vendor(row, ["bonus_malus_ok"])
+
+    return bonus_malus
+
+
+def calculate_remise_by_vendor(df_ok, df_c, col_catalogue, col_rem, col_op, colonnes_commerciaux):
+    remises = {}
+
+    def add_to_vendor(row, prefix):
+        catalogue = to_float(row.get(col_catalogue)) if col_catalogue and col_catalogue in row.index else 0.0
+        remise = to_float(row.get(col_rem)) if col_rem and col_rem in row.index else 0.0
+        remise_sans_op = 0.0 if is_opc(row, col_op) else remise
+        catalogue_hors_op = 0.0 if is_opc(row, col_op) else catalogue
+
+        for col in colonnes_commerciaux:
+            if not col or col not in row.index:
+                continue
+
+            nom = clean_visible(row.get(col))
+            if not nom:
+                continue
+
+            k = normalize_key(nom)
+            if k not in remises:
+                remises[k] = {
+                    "ok_rem_total": 0.0,
+                    "ok_rem_sans_op": 0.0,
+                    "ok_catalogue_total": 0.0,
+                    "ok_rem_hors_op": 0.0,
+                    "ok_catalogue_hors_op": 0.0,
+                    "global_rem_total": 0.0,
+                    "global_rem_sans_op": 0.0,
+                    "global_catalogue_total": 0.0,
+                    "global_rem_hors_op": 0.0,
+                    "global_catalogue_hors_op": 0.0,
+                }
+
+            remises[k][f"{prefix}_rem_total"] += remise
+            remises[k][f"{prefix}_rem_sans_op"] += remise_sans_op
+            remises[k][f"{prefix}_catalogue_total"] += catalogue
+            remises[k][f"{prefix}_rem_hors_op"] += remise_sans_op
+            remises[k][f"{prefix}_catalogue_hors_op"] += catalogue_hors_op
+
+    if not df_c.empty:
+        for _, row in df_c.iterrows():
+            add_to_vendor(row, "global")
+
+    if not df_ok.empty:
+        for _, row in df_ok.iterrows():
+            add_to_vendor(row, "ok")
+
+    return remises
+
+
+def calculate_remise_pct(df, col_catalogue, col_rem, col_op):
+    if df.empty or not col_catalogue or col_catalogue not in df.columns or not col_rem or col_rem not in df.columns:
+        return 0.0
+
+    catalogue = pd.to_numeric(df[col_catalogue], errors="coerce").fillna(0)
+    remise = pd.to_numeric(df[col_rem], errors="coerce").fillna(0)
+
+    if col_op and col_op in df.columns:
+        opc_mask = df.apply(lambda row: is_opc(row, col_op), axis=1)
+        remise = remise.mask(opc_mask, 0)
+        catalogue = catalogue.mask(opc_mask, 0)
+
+    total_catalogue = catalogue.sum()
+    return round(remise.sum() / total_catalogue * 100, 2) if total_catalogue > 0 else 0.0
+
+
+def ensure_remise_columns(df):
+    if df.empty:
+        return df
+
+    df = df.copy()
+    if "remise_ok_pct" not in df.columns:
+        df["remise_ok_pct"] = df.get("remise_hors_opc_pct", 0.0)
+    if "remise_global_pct" not in df.columns:
+        df["remise_global_pct"] = df["remise_ok_pct"]
+    if "remise_hors_opc_global_pct" not in df.columns:
+        df["remise_hors_opc_global_pct"] = df.get("remise_hors_opc_pct", 0.0)
+
+    for col in ["remise_ok_pct", "remise_global_pct", "remise_hors_opc_pct", "remise_hors_opc_global_pct"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    return df
+
+
+def recompute_df_vendeurs_indicators(df_vendeurs, df_ok, df_c, col_vente, col_catalogue, col_rem, col_op, colonnes_commerciaux, key_cols):
+    if df_vendeurs.empty:
+        return df_vendeurs
+
+    df_vendeurs = ensure_bonus_malus_columns(df_vendeurs)
+    df_vendeurs = ensure_remise_columns(df_vendeurs)
+    bonus_malus = calculate_bonus_malus_by_vendor(
+        df_ok,
+        df_c,
+        col_vente,
+        col_catalogue,
+        col_op,
+        colonnes_commerciaux,
+        key_cols
+    )
+    remises = calculate_remise_by_vendor(df_ok, df_c, col_catalogue, col_rem, col_op, colonnes_commerciaux)
+
+    for idx, row in df_vendeurs.iterrows():
+        k = normalize_key(row.get("Commercial"))
+        values = bonus_malus.get(k, {})
+        df_vendeurs.at[idx, "bonus_malus_ok"] = round(values.get("bonus_malus_ok", 0.0), 2)
+        df_vendeurs.at[idx, "bonus_malus_global"] = round(values.get("bonus_malus_global", 0.0), 2)
+
+        remise_values = remises.get(k, {})
+        ok_catalogue_total = remise_values.get("ok_catalogue_total", 0.0)
+        global_catalogue_total = remise_values.get("global_catalogue_total", 0.0)
+        ok_catalogue_hors_op = remise_values.get("ok_catalogue_hors_op", 0.0)
+        global_catalogue_hors_op = remise_values.get("global_catalogue_hors_op", 0.0)
+
+        df_vendeurs.at[idx, "remise_ok_pct"] = round(
+            remise_values.get("ok_rem_sans_op", 0.0) / ok_catalogue_hors_op * 100,
+            2
+        ) if ok_catalogue_hors_op > 0 else 0.0
+        df_vendeurs.at[idx, "remise_global_pct"] = round(
+            remise_values.get("global_rem_sans_op", 0.0) / global_catalogue_hors_op * 100,
+            2
+        ) if global_catalogue_hors_op > 0 else 0.0
+        df_vendeurs.at[idx, "remise_hors_opc_pct"] = round(
+            remise_values.get("ok_rem_hors_op", 0.0) / ok_catalogue_hors_op * 100,
+            2
+        ) if ok_catalogue_hors_op > 0 else 0.0
+        df_vendeurs.at[idx, "remise_hors_opc_global_pct"] = round(
+            remise_values.get("global_rem_hors_op", 0.0) / global_catalogue_hors_op * 100,
+            2
+        ) if global_catalogue_hors_op > 0 else 0.0
+
+    return df_vendeurs
+
+
+def ensure_bonus_malus_columns(df):
+    if df.empty:
+        return df
+
+    df = df.copy()
+    for col in ["bonus_malus_ok", "bonus_malus_global"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df
+
+
 def agence_mask(df, agence, col_agence):
     if not col_agence or col_agence not in df.columns:
         return pd.Series(False, index=df.index)
@@ -326,6 +543,56 @@ def agence_mask(df, agence, col_agence):
 
 def make_affaire_key(row, key_cols):
     return "|".join(normalize_key(row.get(c, "")) for c in key_cols)
+
+
+def amount_key(row, col):
+    if not col or col not in row.index:
+        return "0.00"
+    return f"{to_float(row.get(col)):,.2f}"
+
+
+def make_affaire_match_key(row, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
+    parts = [
+        normalize_key(row.get(col_client, "")) if col_client else "",
+        normalize_key(row.get(col_agence, "")) if col_agence else "",
+        amount_key(row, col_vente),
+        amount_key(row, col_ca_magasin),
+        amount_key(row, col_catalogue),
+    ]
+    return "|".join(parts)
+
+
+def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
+    if ok_detail.empty or attente_detail.empty:
+        return attente_detail
+
+    ok_detail = ok_detail.copy()
+    attente_detail = attente_detail.copy()
+
+    ok_detail["_AFFAIRE_MATCH_KEY_"] = ok_detail.apply(
+        lambda row: make_affaire_match_key(row, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue),
+        axis=1
+    )
+    attente_detail["_AFFAIRE_MATCH_KEY_"] = attente_detail.apply(
+        lambda row: make_affaire_match_key(row, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue),
+        axis=1
+    )
+
+    ok_match_keys = set(ok_detail["_AFFAIRE_MATCH_KEY_"])
+    attente_detail = attente_detail[~attente_detail["_AFFAIRE_MATCH_KEY_"].isin(ok_match_keys)].copy()
+
+    ok_detail = ok_detail.drop(columns=["_AFFAIRE_MATCH_KEY_"], errors="ignore")
+    attente_detail = attente_detail.drop(columns=["_AFFAIRE_MATCH_KEY_"], errors="ignore")
+
+    if key_cols and not attente_detail.empty:
+        ok_detail["_AFFAIRE_KEY_"] = ok_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
+        attente_detail["_AFFAIRE_KEY_"] = attente_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
+
+        ok_keys = set(ok_detail["_AFFAIRE_KEY_"])
+        attente_detail = attente_detail[~attente_detail["_AFFAIRE_KEY_"].isin(ok_keys)].copy()
+        attente_detail = attente_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
+
+    return attente_detail
 
 
 def safe_filename(name):
@@ -445,7 +712,8 @@ def load_all_historique():
         mois, annee = periode_to_month_year(periode)
 
         if "df_vendeurs" in data and isinstance(data["df_vendeurs"], pd.DataFrame):
-            dfv = data["df_vendeurs"].copy()
+            dfv = ensure_bonus_malus_columns(data["df_vendeurs"].copy())
+            dfv = ensure_remise_columns(dfv)
             dfv["periode"] = periode
             dfv["mois_num"] = mois
             dfv["annee"] = annee
@@ -482,10 +750,15 @@ def format_df_vendeurs(df):
         "ca_attente": "CA en attente",
         "ca_total": "CA Total",
         "remise_hors_opc_pct": "Remise moy. % hors OPC",
+        "remise_hors_opc_global_pct": "Remise globale % hors OPC",
+        "remise_ok_pct": "Remise OK hors OPC",
+        "remise_global_pct": "Remise Global hors OPC",
         "base_commission_pct": "Base commission %",
         "points_perdus": "Points perdus",
         "commission_pct": "% Commission",
         "commission_eur": "Commission €",
+        "bonus_malus_ok": "Bonus / Malus OK",
+        "bonus_malus_global": "Bonus / Malus Global",
     })
 
 
@@ -523,7 +796,52 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
-    st.title("🔐 Connexion - ECOHABITAT")
+    logo_path = Path("logo.png")
+    if logo_path.exists():
+        logo_b64 = base64.b64encode(logo_path.read_bytes()).decode("utf-8")
+        logo_html = f'<img src="data:image/png;base64,{logo_b64}" alt="EcoHabitat">'
+    else:
+        logo_html = "<div class='login-logo-fallback'>🏠</div>"
+
+    st.markdown(
+        f"""
+        <style>
+        .login-brand {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            margin: 56px 0 22px;
+            text-align: center;
+        }}
+
+        .login-brand img {{
+            width: 150px;
+            display: block;
+            margin: 0 auto 24px;
+        }}
+
+        .login-brand h1 {{
+            margin: 0;
+            font-size: 40px;
+            font-weight: 800;
+            text-align: center;
+        }}
+
+        .login-logo-fallback {{
+            font-size: 78px;
+            line-height: 1;
+            margin-bottom: 24px;
+        }}
+        </style>
+        <div class="login-brand">
+            {logo_html}
+            <h1>🔐 Connexion - ECOHABITAT</h1>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     username = st.text_input("Identifiant")
     password = st.text_input("Mot de passe", type="password")
@@ -702,6 +1020,8 @@ if role == "admin":
             if vente <= 0:
                 continue
 
+            bonus_malus = calculate_bonus_malus_row(row, col_vente, col_catalogue, col_op, colonnes_commerciaux)
+
             for col in colonnes_commerciaux:
                 if not col or col not in df_confirm.columns:
                     continue
@@ -719,10 +1039,13 @@ if role == "admin":
                         "total": 0.0,
                         "ok": 0.0,
                         "rem_hors_opc": 0.0,
-                        "catalogue_hors_opc": 0.0
+                        "catalogue_hors_opc": 0.0,
+                        "bonus_malus_ok": 0.0,
+                        "bonus_malus_global": 0.0
                     }
 
                 vendors[k]["total"] += vente
+                vendors[k]["bonus_malus_global"] += bonus_malus
 
         for _, row in df_ok.iterrows():
 
@@ -739,6 +1062,7 @@ if role == "admin":
             catalogue = float(catalogue) if pd.notna(catalogue) else 0.0
 
             opc = is_opc(row, col_op)
+            bonus_malus = calculate_bonus_malus_row(row, col_vente, col_catalogue, col_op, colonnes_commerciaux)
 
             for col in colonnes_commerciaux:
                 if not col or col not in df_ok.columns:
@@ -757,10 +1081,13 @@ if role == "admin":
                         "total": 0.0,
                         "ok": 0.0,
                         "rem_hors_opc": 0.0,
-                        "catalogue_hors_opc": 0.0
+                        "catalogue_hors_opc": 0.0,
+                        "bonus_malus_ok": 0.0,
+                        "bonus_malus_global": 0.0
                     }
 
                 vendors[k]["ok"] += vente
+                vendors[k]["bonus_malus_ok"] += bonus_malus
 
                 if not opc:
                     vendors[k]["rem_hors_opc"] += rem
@@ -791,10 +1118,22 @@ if role == "admin":
                 "base_commission_pct": base_comm,
                 "points_perdus": points,
                 "commission_pct": comm_def,
-                "commission_eur": euro
+                "commission_eur": euro,
+                "bonus_malus_ok": round(v["bonus_malus_ok"], 2),
+                "bonus_malus_global": round(v["bonus_malus_global"], 2)
             })
 
-        df_vendeurs = pd.DataFrame(vendeur_results)
+        df_vendeurs = recompute_df_vendeurs_indicators(
+            pd.DataFrame(vendeur_results),
+            df_ok,
+            df_confirm,
+            col_vente,
+            col_catalogue,
+            col_rem,
+            col_op,
+            colonnes_commerciaux,
+            key_cols
+        )
 
         # ====================== AGENCES ======================
 
@@ -1255,7 +1594,22 @@ if st.session_state.get("df_vendeurs") is not None:
         )
         st.stop()
 
-    df_vendeurs_all = st.session_state.df_vendeurs.copy()
+    df_vendeurs_all = recompute_df_vendeurs_indicators(
+        st.session_state.df_vendeurs.copy(),
+        st.session_state.df_ok.copy(),
+        st.session_state.df_c.copy(),
+        st.session_state.col_vente,
+        st.session_state.col_catalogue,
+        st.session_state.col_rem,
+        st.session_state.col_op,
+        [
+            st.session_state.col_com1,
+            st.session_state.col_com2,
+            st.session_state.col_com3
+        ],
+        st.session_state.key_cols
+    )
+    st.session_state.df_vendeurs = df_vendeurs_all.copy()
     df_agences_all = st.session_state.get("df_agences", pd.DataFrame()).copy()
     df_directeurs_all = st.session_state.get("df_directeurs", pd.DataFrame()).copy()
     periode = st.session_state.get("periode", "Mois inconnu")
@@ -1357,6 +1711,22 @@ if st.session_state.get("df_vendeurs") is not None:
                 f"Commission définitive : **{data.get('commission_pct', 0)} %**"
             )
 
+            vendeur_bonus_malus_global = st.toggle(
+                "Afficher la vision globale Remise + Bonus/Malus",
+                value=False,
+                key=f"vendeur_bonus_malus_global_{safe_filename(vendeur)}"
+            )
+            vendeur_bonus_malus_col = "bonus_malus_global" if vendeur_bonus_malus_global else "bonus_malus_ok"
+            vendeur_bonus_malus_label = "🌍 Bonus / Malus Global" if vendeur_bonus_malus_global else "🎯 Bonus / Malus OK"
+            vendeur_remise_col = "remise_global_pct" if vendeur_bonus_malus_global else "remise_ok_pct"
+            vendeur_remise_label = "🌍 Remise Global hors OPC" if vendeur_bonus_malus_global else "🎯 Remise OK hors OPC"
+
+            c_bonus1, c_bonus2 = st.columns(2)
+            with c_bonus1:
+                card(vendeur_remise_label, f"{to_float(data.get(vendeur_remise_col, 0)):,.2f} %")
+            with c_bonus2:
+                card(vendeur_bonus_malus_label, f"{to_float(data.get(vendeur_bonus_malus_col, 0)):,.2f} €")
+
             st.subheader(f"📋 Détail des affaires de **{vendeur}**")
 
             df_ok = st.session_state.df_ok.copy()
@@ -1369,19 +1739,25 @@ if st.session_state.get("df_vendeurs") is not None:
             ]
 
             key_cols = st.session_state.key_cols
+            col_client = st.session_state.col_client
+            col_agence = st.session_state.col_agence
+            col_vente = st.session_state.col_vente
+            col_ca_magasin = st.session_state.col_ca_magasin
+            col_catalogue = st.session_state.col_catalogue
 
             ok_detail = df_ok[vendeur_mask(df_ok, vendeur, colonnes_commerciaux)].copy()
             attente_detail = df_c[vendeur_mask(df_c, vendeur, colonnes_commerciaux)].copy()
 
-            if key_cols:
-                ok_detail["_AFFAIRE_KEY_"] = ok_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
-                attente_detail["_AFFAIRE_KEY_"] = attente_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
-
-                ok_keys = set(ok_detail["_AFFAIRE_KEY_"])
-                attente_detail = attente_detail[~attente_detail["_AFFAIRE_KEY_"].isin(ok_keys)]
-
-                ok_detail = ok_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
-                attente_detail = attente_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
+            attente_detail = remove_attente_already_ok(
+                ok_detail,
+                attente_detail,
+                key_cols,
+                col_client,
+                col_agence,
+                col_vente,
+                col_ca_magasin,
+                col_catalogue
+            )
 
             ok_detail["Statut"] = "✅ OK"
             attente_detail["Statut"] = "⏳ En attente"
@@ -1389,13 +1765,8 @@ if st.session_state.get("df_vendeurs") is not None:
             detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
 
             if not detail.empty:
-                col_client = st.session_state.col_client
                 col_doc = st.session_state.col_doc
                 col_date = st.session_state.col_date
-                col_agence = st.session_state.col_agence
-                col_vente = st.session_state.col_vente
-                col_ca_magasin = st.session_state.col_ca_magasin
-                col_catalogue = st.session_state.col_catalogue
                 col_rem = st.session_state.col_rem
                 col_op = st.session_state.col_op
 
@@ -1405,14 +1776,10 @@ if st.session_state.get("df_vendeurs") is not None:
                     if c and c in detail_calc.columns:
                         detail_calc[c] = pd.to_numeric(detail_calc[c], errors="coerce").fillna(0)
 
-                def count_vendeurs_row(row):
-                    nb = 0
-                    for c in colonnes_commerciaux:
-                        if c and c in row.index and clean_visible(row.get(c)):
-                            nb += 1
-                    return max(nb, 1)
-
-                detail_calc["Nombre de vendeurs"] = detail_calc.apply(count_vendeurs_row, axis=1)
+                detail_calc["Nombre de vendeurs"] = detail_calc.apply(
+                    lambda row: count_vendeurs_row(row, colonnes_commerciaux),
+                    axis=1
+                )
 
                 if col_catalogue and col_catalogue in detail_calc.columns and col_rem and col_rem in detail_calc.columns:
                     detail_calc["Remise %"] = np.where(
@@ -1440,27 +1807,6 @@ if st.session_state.get("df_vendeurs") is not None:
                 else:
                     opc_mask = pd.Series(False, index=detail_calc.index)
                     detail_calc["OPC"] = ""
-
-                remise_total_hors_opc = 0
-                if col_catalogue and col_catalogue in detail_calc.columns and col_rem and col_rem in detail_calc.columns:
-                    base_hors_opc = detail_calc.loc[~opc_mask, col_catalogue].sum()
-                    rem_hors_opc = detail_calc.loc[~opc_mask, col_rem].sum()
-                    remise_total_hors_opc = (rem_hors_opc / base_hors_opc * 100) if base_hors_opc > 0 else 0
-
-                bonus_malus_valides = detail_calc.loc[
-                    detail_calc["Statut"].astype(str).str.contains("OK", case=False, na=False),
-                    "Bonus / Malus"
-                ].sum()
-
-                bonus_malus_global = detail_calc["Bonus / Malus"].sum()
-
-                c_bonus1, c_bonus2, c_bonus3 = st.columns(3)
-                with c_bonus1:
-                    card("📉 Remise moyenne hors OPC", f"{remise_total_hors_opc:,.2f} %")
-                with c_bonus2:
-                    card("✅ Bonus / Malus validés", f"{bonus_malus_valides:,.2f} €")
-                with c_bonus3:
-                    card("📊 Bonus / Malus global", f"{bonus_malus_global:,.2f} €")
 
                 cols_show = [
                     col_client,
@@ -1571,19 +1917,24 @@ if st.session_state.get("df_vendeurs") is not None:
             df_c = st.session_state.df_c.copy()
             col_agence = st.session_state.col_agence
             key_cols = st.session_state.key_cols
+            col_client = st.session_state.col_client
+            col_vente = st.session_state.col_vente
+            col_ca_magasin = st.session_state.col_ca_magasin
+            col_catalogue = st.session_state.col_catalogue
 
             ok_detail = df_ok[agence_mask(df_ok, agence, col_agence)].copy()
             attente_detail = df_c[agence_mask(df_c, agence, col_agence)].copy()
 
-            if key_cols:
-                ok_detail["_AFFAIRE_KEY_"] = ok_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
-                attente_detail["_AFFAIRE_KEY_"] = attente_detail.apply(lambda row: make_affaire_key(row, key_cols), axis=1)
-
-                ok_keys = set(ok_detail["_AFFAIRE_KEY_"])
-                attente_detail = attente_detail[~attente_detail["_AFFAIRE_KEY_"].isin(ok_keys)]
-
-                ok_detail = ok_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
-                attente_detail = attente_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
+            attente_detail = remove_attente_already_ok(
+                ok_detail,
+                attente_detail,
+                key_cols,
+                col_client,
+                col_agence,
+                col_vente,
+                col_ca_magasin,
+                col_catalogue
+            )
 
             ok_detail["Statut"] = "✅ OK"
             attente_detail["Statut"] = "⏳ En attente"
@@ -1629,6 +1980,20 @@ if st.session_state.get("df_vendeurs") is not None:
             total_attente = df_vendeurs["ca_attente"].sum()
             total_global = df_vendeurs["ca_total"].sum()
             total_commissions = df_vendeurs["commission_eur"].sum()
+            bonus_malus_col = "bonus_malus_ok"
+            bonus_malus_label = "🎯 Bonus / Malus OK"
+            remise_label = "🎯 Remise OK hors OPC"
+            total_bonus_malus = (
+                df_vendeurs[bonus_malus_col].sum()
+                if bonus_malus_col in df_vendeurs.columns
+                else 0
+            )
+            total_remise = calculate_remise_pct(
+                st.session_state.df_ok,
+                st.session_state.col_catalogue,
+                st.session_state.col_rem,
+                st.session_state.col_op
+            )
 
             total_comm_magasin = (
                 df_directeurs["commission_magasin_eur"].sum()
@@ -1636,7 +2001,7 @@ if st.session_state.get("df_vendeurs") is not None:
                 else 0
             )
 
-            c1, c2, c3, c4, c5 = st.columns(5)
+            c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 
             with c1:
                 card("✅ CA OK vendeurs", f"{total_ok:,.2f} €")
@@ -1651,13 +2016,29 @@ if st.session_state.get("df_vendeurs") is not None:
                 card("💰 Commissions vendeurs", f"{total_commissions:,.2f} €")
 
             with c5:
+                card(remise_label, f"{total_remise:,.2f} %")
+
+            with c6:
+                card(bonus_malus_label, f"{total_bonus_malus:,.2f} €")
+
+            with c7:
                 card("🏢 Comm. magasin", f"{total_comm_magasin:,.2f} €")
 
             st.divider()
 
             st.subheader("🏆 Classement vendeurs")
+            df_classement_vendeurs = format_df_vendeurs(df_vendeurs)
+            df_classement_vendeurs = df_classement_vendeurs.drop(
+                columns=[
+                    "Bonus / Malus Global",
+                    "Remise Global hors OPC",
+                    "Remise moy. % hors OPC",
+                    "Remise globale % hors OPC"
+                ],
+                errors="ignore"
+            )
             st.dataframe(
-                format_df_vendeurs(df_vendeurs).sort_values("CA OK", ascending=False).reset_index(drop=True),
+                df_classement_vendeurs.sort_values("CA OK", ascending=False).reset_index(drop=True),
                 use_container_width=True
             )
 
