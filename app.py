@@ -9,10 +9,14 @@ import json
 
 st.set_page_config(page_title="Espace Commissions ECOHABITAT", layout="wide")
 
-HISTORIQUE_DIR = Path("historique")
-HISTORIQUE_DIR.mkdir(exist_ok=True)
+# ====================== STOCKAGE LOCAL / RENDER / OVH ======================
 
-USERS_FILE = Path("users.json")
+DATA_DIR = Path("/data") if Path("/data").exists() else Path(".")
+
+HISTORIQUE_DIR = DATA_DIR / "historique"
+HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
+
+USERS_FILE = DATA_DIR / "users.json"
 
 # ====================== USERS ======================
 
