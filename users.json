@@ -1,0 +1,14 @@
+{
+    "joseph": {
+        "password": "admin123",
+        "role": "admin",
+        "nom": "LUCCHINI JOSEPH",
+        "agence": null
+    },
+    "kevin": {
+        "password": "kevin123",
+        "role": "vendeur",
+        "nom": "LEMOINE KEVIN",
+        "agence": null
+    }
+}
