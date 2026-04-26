@@ -9,6 +9,167 @@ import json
 
 st.set_page_config(page_title="Espace Commissions ECOHABITAT", layout="wide")
 
+# ====================== CSS DESIGN ======================
+
+st.markdown("""
+<style>
+
+/* GLOBAL */
+.stApp {
+    background: #F6F8F4;
+    color: #1F2933;
+}
+
+html, body, [class*="css"] {
+    color: #1F2933 !important;
+}
+
+/* SIDEBAR */
+[data-testid="stSidebar"] {
+    background: #FFFFFF;
+    border-right: 1px solid #E5E5E5;
+}
+
+[data-testid="stSidebar"] * {
+    color: #1F2933 !important;
+}
+
+/* TEXTES */
+h1, h2, h3, h4, h5, h6,
+p, label {
+    color: #1F2933 !important;
+}
+
+/* CAPTION */
+[data-testid="stMarkdownContainer"] * {
+    color: #1F2933 !important;
+}
+
+[data-testid="stDataFrame"] * {
+    color: inherit !important;
+}
+/* HEADER */
+.eco-header {
+    background: white;
+    padding: 22px;
+    border-radius: 16px;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+    border-left: 6px solid #66B32E;
+}
+
+.eco-title {
+    font-size: 32px;
+    font-weight: 800;
+    color: #1F2933 !important;
+}
+
+.eco-subtitle {
+    color: #66B32E !important;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+/* TABS */
+button[data-baseweb="tab"] {
+    font-weight: 700;
+    color: #1F2933 !important;
+}
+
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #66B32E !important;
+}
+
+/* BOUTONS */
+.stButton > button {
+    border-radius: 10px;
+    font-weight: 600;
+    background: #1F2933;
+    color: white !important;
+}
+
+.stButton > button[kind="primary"] {
+    background-color: #66B32E !important;
+}
+
+/* INPUTS */
+input, textarea, select {
+    color: #1F2933 !important;
+}
+
+/* ALERTES */
+[data-testid="stAlert"] * {
+    color: #1F2933 !important;
+}
+
+/* TABLEAUX */
+[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+/* CARDS */
+.eco-card {
+    background: white;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.06);
+    border-left: 6px solid #66B32E;
+    text-align: center;
+    min-height: 105px;
+}
+
+.eco-card-title {
+    font-size: 14px;
+    color: #6B7280 !important;
+    font-weight: 600;
+}
+
+.eco-card-value {
+    font-size: 24px;
+    font-weight: 800;
+    color: #1F2933 !important;
+    margin-top: 8px;
+}
+/* CORRECTION BOUTONS SIDEBAR */
+[data-testid="stSidebar"] .stButton > button {
+    background: #FFFFFF !important;
+    color: #1F2933 !important;
+    border: 1px solid #D1D5DB !important;
+}
+
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: #66B32E !important;
+    color: white !important;
+    border: 1px solid #66B32E !important;
+}
+
+[data-testid="stSidebar"] .stButton > button * {
+    color: inherit !important;
+}
+/* INPUT LOGIN / TEXT INPUT */
+input[type="text"], 
+input[type="password"], 
+textarea, 
+select {
+    background-color: #FFFFFF !important;
+    color: #1F2933 !important;
+    border: 1px solid #D1D5DB !important;
+    border-radius: 8px !important;
+}
+
+input:focus, textarea:focus, select:focus {
+    border-color: #66B32E !important;
+    box-shadow: 0 0 0 1px #66B32E !important;
+}
+
+::placeholder {
+    color: #9CA3AF !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 # ====================== STOCKAGE LOCAL / RENDER / OVH ======================
 
 DATA_DIR = Path("/data") if Path("/data").exists() else Path(".")
@@ -17,6 +178,7 @@ HISTORIQUE_DIR = DATA_DIR / "historique"
 HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
+
 
 # ====================== USERS ======================
 
@@ -44,6 +206,15 @@ def save_users(users):
 
 
 # ====================== FONCTIONS ======================
+
+def card(title, value):
+    st.markdown(f"""
+    <div class="eco-card">
+        <div class="eco-card-title">{title}</div>
+        <div class="eco-card-value">{value}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 
 def normalize_key(s):
     if pd.isna(s):
@@ -259,11 +430,27 @@ if not st.session_state.logged_in:
 user = st.session_state.user
 role = user["role"]
 
+
 # ====================== HEADER ======================
 
-st.title("🚀 Espace Commissions - ECOHABITAT")
-st.markdown(
-    "**Logique VBA :** Vendeurs = colonne Q | Agences = colonne I | "
+st.markdown('<div class="eco-header">', unsafe_allow_html=True)
+
+col1, col2 = st.columns([1,6])
+
+with col1:
+    try:
+        st.image("logo.png", width=90)
+    except:
+        st.markdown("🏠")
+
+with col2:
+    st.markdown('<div class="eco-title">Espace Commissions EcoHabitat</div>', unsafe_allow_html=True)
+    st.markdown('<div class="eco-subtitle">L’excellence au service de votre habitat</div>', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+st.caption(
+    "Logique : Vendeurs = colonne Q | Agences = colonne I | "
     "Remise commission hors OPC | Directeur agence = 1% CA agence + prime"
 )
 
@@ -274,6 +461,7 @@ if st.sidebar.button("🚪 Déconnexion"):
         if k in st.session_state:
             del st.session_state[k]
     st.rerun()
+
 
 # ====================== SIDEBAR HISTORIQUE ======================
 
@@ -297,6 +485,7 @@ if st.sidebar.button("📥 Charger la période"):
             st.success(f"✅ Période {periode_load} chargée.")
         else:
             st.error("❌ Impossible de charger cette période.")
+
 
 # ====================== IMPORT ADMIN ======================
 
@@ -828,10 +1017,18 @@ if st.session_state.get("df_vendeurs") is not None:
             data = data.iloc[0]
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("✅ CA OK", f"{data['ca_ok']:,.2f} €")
-            c2.metric("⏳ CA en attente", f"{data['ca_attente']:,.2f} €")
-            c3.metric("📌 CA Total", f"{data['ca_total']:,.2f} €")
-            c4.metric("💰 Commission", f"{data['commission_eur']:,.2f} €")
+
+            with c1:
+                card("✅ CA OK", f"{data['ca_ok']:,.2f} €")
+
+            with c2:
+                card("⏳ CA en attente", f"{data['ca_attente']:,.2f} €")
+
+            with c3:
+                card("📌 CA Total", f"{data['ca_total']:,.2f} €")
+
+            with c4:
+                card("💰 Commission", f"{data['commission_eur']:,.2f} €")
 
             st.write(
                 f"Remise commission hors OPC : **{data.get('remise_hors_opc_pct', 0)} %** | "
@@ -921,10 +1118,18 @@ if st.session_state.get("df_vendeurs") is not None:
             data = data.iloc[0]
 
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("✅ CA OK agence", f"{data['ca_ok']:,.2f} €")
-            c2.metric("⏳ CA en attente agence", f"{data['ca_attente']:,.2f} €")
-            c3.metric("📌 CA Total agence", f"{data['ca_total']:,.2f} €")
-            c4.metric("🏢 CA magasin OK", f"{data['ca_magasin_ok']:,.2f} €")
+
+            with c1:
+                card("✅ CA OK agence", f"{data['ca_ok']:,.2f} €")
+
+            with c2:
+                card("⏳ CA en attente agence", f"{data['ca_attente']:,.2f} €")
+
+            with c3:
+                card("📌 CA Total agence", f"{data['ca_total']:,.2f} €")
+
+            with c4:
+                card("🏢 CA magasin OK", f"{data['ca_magasin_ok']:,.2f} €")
 
             st.write(
                 f"Remise moyenne agence : **{data['remise_pct']} %** | "
@@ -1004,11 +1209,20 @@ if st.session_state.get("df_vendeurs") is not None:
 
             c1, c2, c3, c4, c5 = st.columns(5)
 
-            c1.metric("✅ CA OK vendeurs", f"{total_ok:,.2f} €")
-            c2.metric("⏳ CA attente vendeurs", f"{total_attente:,.2f} €")
-            c3.metric("📌 CA Total vendeurs", f"{total_global:,.2f} €")
-            c4.metric("💰 Commissions vendeurs", f"{total_commissions:,.2f} €")
-            c5.metric("🏢 Comm. magasin", f"{total_comm_magasin:,.2f} €")
+            with c1:
+                card("✅CA OK vendeurs", f"{total_ok:,.2f} €")
+
+            with c2:
+                card("⏳ CA attente vendeurs", f"{total_attente:,.2f} €")
+
+            with c3:
+                card("📌 CA Total vendeurs", f"{total_global:,.2f} €")
+
+            with c4:
+                card("💰 Commissions vendeurs", f"{total_commissions:,.2f} €")
+
+            with c5:
+                card("🏢 Comm. magasin", f"{total_comm_magasin:,.2f} €")
 
             st.divider()
 
@@ -1091,4 +1305,4 @@ else:
         st.divider()
         afficher_admin_users()
 
-st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence")
+st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence • Design EcoHabitat")
