@@ -3237,6 +3237,21 @@ if st.session_state.get("df_vendeurs") is not None:
                     if str(row.get("Statut", "")).startswith("⏳") else "",
                     axis=1
                 )
+                detail_calc["Détail motif"] = detail_calc.apply(
+                    lambda row: clean_visible(motifs_attente.get(row.get("_ATTENTE_KEY_", ""), {}).get("detail", ""))
+                    if str(row.get("Statut", "")).startswith("⏳") else "",
+                    axis=1
+                )
+                detail_calc["_BULLE_ATTENTE_"] = detail_calc.apply(
+                    lambda row: " | ".join([
+                        part for part in [
+                            clean_visible(row.get("Motif d'attente", "")),
+                            clean_visible(row.get("Détail motif", ""))
+                        ]
+                        if part
+                    ]),
+                    axis=1
+                )
                 def statut_avec_motif(row):
                     motif = clean_visible(row.get("Motif d'attente", ""))
                     if motif:
@@ -3384,7 +3399,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
                 render_table_with_status_tooltips(
                     detail_affichage,
-                    tooltip_by_index=detail_calc["Motif d'attente"].to_dict(),
+                    tooltip_by_index=detail_calc["_BULLE_ATTENTE_"].to_dict(),
                     height=600
                 )
             else:
