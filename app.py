@@ -1,10 +1,12 @@
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import pickle
 import json
+import html
 import base64
 import re
 import os
@@ -12,6 +14,7 @@ import io
 import zipfile
 import unicodedata
 from datetime import datetime
+from urllib.parse import quote
 from openpyxl import load_workbook
 
 # ====================== CONFIG ======================
@@ -186,6 +189,8 @@ HISTORIQUE_DIR = DATA_DIR / "historique"
 HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
+ATTENTE_MOTIFS_FILE = DATA_DIR / "motifs_attente.json"
+SETTINGS_FILE = DATA_DIR / "settings.json"
 
 
 # ====================== USERS ======================
@@ -213,6 +218,53 @@ def save_users(users):
         json.dump(users, f, indent=4, ensure_ascii=False)
 
 
+def load_settings():
+    if SETTINGS_FILE.exists():
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=4, ensure_ascii=False)
+
+
+# ====================== MOTIFS D'ATTENTE ======================
+
+MOTIFS_ATTENTE_OPTIONS = [
+    "",
+    "Pièce administrative manquante",
+    "Financement en attente",
+    "Acompte manquant",
+    "Validation client en attente",
+    "Métré / technique à confirmer",
+    "OPC / offre commerciale à vérifier",
+    "Erreur ou information ProDevis",
+    "Autre"
+]
+
+
+def load_motifs_attente():
+    if ATTENTE_MOTIFS_FILE.exists():
+        with open(ATTENTE_MOTIFS_FILE, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_motifs_attente(data):
+    with open(ATTENTE_MOTIFS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
 # ====================== FONCTIONS DESIGN ======================
 
 def card(title, value):
@@ -222,6 +274,208 @@ def card(title, value):
         <div class="eco-card-value">{value}</div>
     </div>
     """, unsafe_allow_html=True)
+
+
+def render_table_with_status_tooltips(df, tooltip_by_index=None, height=600):
+    tooltip_by_index = tooltip_by_index or {}
+    money_cols = {"TOTAL VENTE", "Vente HT hors acompte", "Bonus / Malus", "CA global affaire"}
+    percent_cols = {"Remise %"}
+
+    def format_cell(col, value):
+        if pd.isna(value):
+            return ""
+        if col in money_cols:
+            return f"{to_float(value):,.2f} €"
+        if col in percent_cols:
+            return f"{to_float(value):.2f} %"
+        return str(value)
+
+    def cell_class(col, value):
+        if col == "Bonus / Malus":
+            v = to_float(value)
+            if v > 0:
+                return " bm-positive"
+            if v < 0:
+                return " bm-negative"
+        if col in money_cols or col in percent_cols:
+            return " numeric"
+        return ""
+
+    headers = [""] + list(df.columns)
+    html_parts = [
+        f"""
+        <style>
+        .eco-table-wrap {{
+            max-height: {height}px;
+            overflow: auto;
+            border: 1px solid #E5E7EB;
+            border-radius: 10px;
+            background: #FFFFFF;
+        }}
+        .eco-table {{
+            border-collapse: collapse;
+            width: max-content;
+            min-width: 100%;
+            font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            font-size: 14px;
+            line-height: 1.35;
+        }}
+        .eco-table th, .eco-table td {{
+            border-bottom: 1px solid #E5E7EB;
+            border-right: 1px solid #E5E7EB;
+            padding: 9px 10px;
+            white-space: nowrap;
+            color: #1F2933;
+        }}
+        .eco-table th {{
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background: #F8FAFC;
+            color: #6B7280;
+            font-weight: 500;
+            text-align: left;
+        }}
+        .eco-table .row-index {{
+            color: #6B7280;
+            text-align: right;
+            min-width: 34px;
+        }}
+        .eco-table .numeric {{
+            text-align: right;
+        }}
+        .eco-table .bm-positive {{
+            background: #D1FADF;
+            color: #065F46;
+            font-weight: 700;
+            text-align: right;
+        }}
+        .eco-table .bm-negative {{
+            background: #FECACA;
+            color: #991B1B;
+            font-weight: 700;
+            text-align: right;
+        }}
+        .status-tip {{
+            position: relative;
+            display: inline-block;
+            cursor: help;
+        }}
+        .status-tip::after {{
+            content: attr(data-tip);
+            position: absolute;
+            left: 0;
+            bottom: 145%;
+            display: none;
+            min-width: 220px;
+            max-width: 360px;
+            padding: 9px 11px;
+            border-radius: 8px;
+            background: #1F2933;
+            color: #FFFFFF;
+            white-space: normal;
+            box-shadow: 0 8px 22px rgba(0,0,0,0.18);
+            z-index: 20;
+        }}
+        .status-tip:hover::after {{
+            display: block;
+        }}
+        </style>
+        <div class="eco-table-wrap">
+        <table class="eco-table">
+        """
+    ]
+    html_parts.append("<thead><tr>")
+    for header in headers:
+        html_parts.append(f"<th>{html.escape(str(header))}</th>")
+    html_parts.append("</tr></thead><tbody>")
+
+    for display_idx, (idx, row) in enumerate(df.iterrows()):
+        html_parts.append("<tr>")
+        html_parts.append(f'<td class="row-index">{display_idx}</td>')
+        for col in df.columns:
+            value = row.get(col, "")
+            text = format_cell(col, value)
+            cls = cell_class(col, value)
+            if col == "Statut" and clean_visible(tooltip_by_index.get(idx, "")):
+                tip = html.escape(clean_visible(tooltip_by_index.get(idx, "")), quote=True)
+                cell_html = f'<span class="status-tip" data-tip="{tip}">⏳ En attente ⓘ</span>'
+            else:
+                cell_html = html.escape(text)
+            html_parts.append(f'<td class="{cls.strip()}">{cell_html}</td>')
+        html_parts.append("</tr>")
+
+    html_parts.append("</tbody></table></div>")
+    components.html("".join(html_parts), height=height + 40, scrolling=True)
+
+
+def build_attente_internal_mail_body(df, periode, col_client, col_doc, col_date, col_agence, col_ca_magasin):
+    lines = [
+        "Bonjour,",
+        "",
+        f"Point hebdomadaire des dossiers en attente - {periode}",
+        "",
+        f"Nombre de dossiers : {len(df)}",
+    ]
+
+    if col_ca_magasin and col_ca_magasin in df.columns:
+        total = pd.to_numeric(df[col_ca_magasin], errors="coerce").fillna(0).sum()
+        lines.append(f"CA global en attente : {total:,.2f} EUR")
+
+    lines.append("")
+    lines.append(
+        "Merci à l'ADV de compléter les motifs manquants et de mettre à jour les motifs déjà renseignés "
+        "si la situation du dossier a évolué."
+    )
+    lines.append("Lien Manager pour compléter les motifs : https://manager.ecohabitat76.fr/")
+    lines.append(
+        "L'objectif est que chaque dossier en attente indique clairement l'élément bloquant et l'action attendue."
+    )
+    lines.append("")
+    lines.append("Dossiers à suivre :")
+
+    if df.empty:
+        lines.append("- Aucun dossier en attente sur la sélection.")
+        return "\n".join(lines)
+
+    group_col = col_agence if col_agence and col_agence in df.columns else None
+    if group_col:
+        grouped_items = df.groupby(df[group_col].fillna("").map(clean_visible), dropna=False)
+    else:
+        grouped_items = [("Non classé", df)]
+
+    for agence, group in grouped_items:
+        lines.append("")
+        lines.append(f"Agence : {agence or 'Non renseignée'}")
+        for _, row in group.iterrows():
+            client = clean_visible(row.get(col_client, "")) if col_client else "Dossier"
+            doc = clean_visible(row.get(col_doc, "")) if col_doc else ""
+            date_doc = ""
+            if col_date and col_date in row.index:
+                parsed_date = pd.to_datetime(row.get(col_date), errors="coerce")
+                if not pd.isna(parsed_date):
+                    date_doc = parsed_date.strftime("%d/%m/%Y")
+            commerciaux = clean_visible(row.get("Commerciaux", ""))
+            motif = clean_visible(row.get("Motif d'attente", "")) or "Motif à compléter"
+            detail = clean_visible(row.get("Détail motif", "")) or "Élément manquant à préciser"
+
+            line = f"- {client}"
+            if doc:
+                line += f" | Doc {doc}"
+            if date_doc:
+                line += f" | {date_doc}"
+            if commerciaux:
+                line += f" | {commerciaux}"
+            line += f" | Motif : {motif} | À obtenir : {detail}"
+            lines.append(line)
+
+    lines.extend([
+        "",
+        "Merci également de mettre à jour les dossiers dès réception des éléments afin de permettre leur passage en statut actif.",
+        "",
+        "Cordialement,"
+    ])
+    return "\n".join(lines)
 
 
 # ====================== FONCTIONS OUTILS ======================
@@ -656,6 +910,17 @@ def make_affaire_client_agence_key(row, col_client, col_agence):
         normalize_key(row.get(col_client, "")) if col_client else "",
         normalize_key(row.get(col_agence, "")) if col_agence else "",
     ])
+
+
+def make_attente_tracking_key(row, col_client, col_doc, col_agence, col_ca_magasin, col_catalogue):
+    parts = [
+        normalize_key(row.get(col_doc, "")) if col_doc else "",
+        normalize_key(row.get(col_client, "")) if col_client else "",
+        normalize_key(row.get(col_agence, "")) if col_agence else "",
+        amount_key(row, col_ca_magasin),
+        amount_key(row, col_catalogue),
+    ]
+    return "|".join(parts)
 
 
 def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
@@ -2399,6 +2664,21 @@ def afficher_dossiers_en_attente(tab):
             lambda row: list_commerciaux_row(row, colonnes_commerciaux),
             axis=1
         )
+        attente["_ATTENTE_KEY_"] = attente.apply(
+            lambda row: make_attente_tracking_key(row, col_client, col_doc, col_agence, col_ca_magasin, col_catalogue),
+            axis=1
+        )
+
+        motifs_attente = load_motifs_attente()
+        attente["Motif d'attente"] = attente["_ATTENTE_KEY_"].apply(
+            lambda key: clean_visible(motifs_attente.get(key, {}).get("motif", ""))
+        )
+        attente["Détail motif"] = attente["_ATTENTE_KEY_"].apply(
+            lambda key: clean_visible(motifs_attente.get(key, {}).get("detail", ""))
+        )
+        attente["Dernière relance"] = attente["_ATTENTE_KEY_"].apply(
+            lambda key: clean_visible(motifs_attente.get(key, {}).get("derniere_relance", ""))
+        )
 
         if col_op and col_op in attente.columns:
             attente["OPC"] = np.where(attente.apply(lambda row: is_opc(row, col_op), axis=1), "OUI", "")
@@ -2420,12 +2700,17 @@ def afficher_dossiers_en_attente(tab):
         })
         agences = sorted(attente[col_agence].dropna().map(clean_visible).unique()) if col_agence in attente.columns else []
 
-        f1, f2, f3, f4 = st.columns([2, 2, 1, 2])
+        f1, f2, f3, f4, f5 = st.columns([2, 2, 1, 2, 2])
 
         vendeur_filtre = f1.selectbox("Commercial", ["Tous"] + vendeurs, key="attente_filtre_vendeur")
         agence_filtre = f2.selectbox("Agence", ["Toutes"] + agences, key="attente_filtre_agence")
         opc_filtre = f3.selectbox("OPC", ["Tous", "Oui", "Non"], key="attente_filtre_opc")
         recherche = f4.text_input("Recherche client / document", key="attente_recherche").strip()
+        motif_filtre = f5.selectbox(
+            "Motif",
+            ["Tous", "À compléter"] + [m for m in MOTIFS_ATTENTE_OPTIONS if m],
+            key="attente_filtre_motif"
+        )
 
         filtered = attente.copy()
 
@@ -2441,6 +2726,11 @@ def afficher_dossiers_en_attente(tab):
             filtered = filtered[filtered["OPC"] == "OUI"]
         elif opc_filtre == "Non":
             filtered = filtered[filtered["OPC"] != "OUI"]
+
+        if motif_filtre == "À compléter":
+            filtered = filtered[filtered["Motif d'attente"].eq("")]
+        elif motif_filtre != "Tous":
+            filtered = filtered[filtered["Motif d'attente"].apply(normalize_key) == normalize_key(motif_filtre)]
 
         if recherche:
             search_cols = [c for c in [col_client, col_doc, "Commerciaux", col_agence] if c and c in filtered.columns]
@@ -2465,11 +2755,138 @@ def afficher_dossiers_en_attente(tab):
             else 0
         )
 
-        c1, c2 = st.columns(2)
+        dossiers_sans_motif = int(filtered["Motif d'attente"].eq("").sum()) if "Motif d'attente" in filtered.columns else 0
+
+        c1, c2, c3 = st.columns(3)
         with c1:
             card("⏳ Nb dossiers", f"{len(filtered)}")
         with c2:
             card("🏢 CA global en attente", f"{total_ca_global:,.2f} €")
+        with c3:
+            card("📝 Motif à compléter", f"{dossiers_sans_motif}")
+
+        if dossiers_sans_motif:
+            st.caption("Motifs manquants à compléter depuis le volet de suivi ci-dessous.")
+
+        if not filtered.empty:
+            with st.expander("📝 Modifier un motif d'attente / relance", expanded=False):
+                dossier_options = []
+                dossier_labels = {}
+
+                for display_idx, row in filtered.reset_index(drop=True).iterrows():
+                    key = row.get("_ATTENTE_KEY_", "")
+                    client_label = clean_visible(row.get(col_client, "")) if col_client else "Dossier"
+                    doc_label = clean_visible(row.get(col_doc, "")) if col_doc else ""
+                    agence_label = clean_visible(row.get(col_agence, "")) if col_agence else ""
+                    motif_label = clean_visible(row.get("Motif d'attente", "")) or "À compléter"
+                    label = f"{client_label}"
+                    if doc_label:
+                        label += f" | {doc_label}"
+                    if agence_label:
+                        label += f" | {agence_label}"
+                    label += f" | {motif_label}"
+                    option_key = f"{key}__{display_idx}"
+                    dossier_options.append(option_key)
+                    dossier_labels[option_key] = label
+
+                selected_option = st.selectbox(
+                    "Dossier à mettre à jour",
+                    dossier_options,
+                    format_func=lambda key: dossier_labels.get(key, key),
+                    key="attente_dossier_motif_select"
+                )
+                selected_key = selected_option.rsplit("__", 1)[0]
+                selected_row = filtered[filtered["_ATTENTE_KEY_"] == selected_key].iloc[0]
+                selected_record = motifs_attente.get(selected_key, {})
+                selected_suffix = safe_filename(selected_key)[0:80]
+
+                motif_current = clean_visible(selected_record.get("motif", ""))
+                motif_index = MOTIFS_ATTENTE_OPTIONS.index(motif_current) if motif_current in MOTIFS_ATTENTE_OPTIONS else 0
+
+                with st.form(key=f"form_motif_attente_{selected_suffix}"):
+                    m1, m2 = st.columns([1, 2])
+                    with m1:
+                        motif_value = st.selectbox(
+                            "Motif d'attente obligatoire",
+                            MOTIFS_ATTENTE_OPTIONS,
+                            index=motif_index
+                        )
+                        relance_value = st.checkbox(
+                            "Relance effectuée aujourd'hui",
+                            value=False
+                        )
+                    with m2:
+                        detail_value = st.text_area(
+                            "Détail / élément manquant",
+                            value=clean_visible(selected_record.get("detail", "")),
+                            height=80
+                        )
+
+                    save_motif = st.form_submit_button("💾 Enregistrer le suivi")
+
+                if save_motif:
+                    if not clean_visible(motif_value):
+                        st.error("Le motif d'attente est obligatoire.")
+                    else:
+                        previous_relance = clean_visible(selected_record.get("derniere_relance", ""))
+                        motifs_attente[selected_key] = {
+                            "motif": clean_visible(motif_value),
+                            "detail": clean_visible(detail_value),
+                            "derniere_relance": datetime.now().strftime("%d/%m/%Y") if relance_value else previous_relance,
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                            "updated_by": user.get("nom", st.session_state.get("username", ""))
+                        }
+                        save_motifs_attente(motifs_attente)
+                        st.success("Motif d'attente enregistré ✅")
+                        st.rerun()
+
+                mail_subject = f"Éléments manquants dossier {clean_visible(selected_row.get(col_client, ''))}"
+                mail_body = (
+                    "Bonjour,\n\n"
+                    "Nous revenons vers vous concernant votre dossier.\n\n"
+                    f"Motif d'attente : {clean_visible(motif_current) or '[à compléter]'}\n"
+                    f"Élément attendu : {clean_visible(selected_record.get('detail', '')) or '[à compléter]'}\n\n"
+                    "Merci de nous transmettre les éléments nécessaires afin que nous puissions faire avancer le dossier.\n\n"
+                    "Cordialement,\nEcoHabitat"
+                )
+                mailto_url = f"mailto:?subject={quote(mail_subject)}&body={quote(mail_body)}"
+                st.link_button("📧 Préparer un mail de relance", mailto_url)
+
+            with st.expander("📧 Mail interne hebdomadaire", expanded=False):
+                settings = load_settings()
+                internal_recipients = st.text_input(
+                    "Destinataires internes",
+                    value=clean_visible(settings.get("attente_internal_recipients", "")),
+                    placeholder="secretariat@...; associe@...",
+                    key="attente_internal_recipients"
+                )
+
+                if st.button("💾 Enregistrer les destinataires", key="save_attente_internal_recipients"):
+                    settings["attente_internal_recipients"] = clean_visible(internal_recipients)
+                    save_settings(settings)
+                    st.success("Destinataires enregistrés ✅")
+
+                internal_subject = f"Suivi hebdomadaire dossiers en attente - {periode}"
+                internal_body = build_attente_internal_mail_body(
+                    filtered,
+                    periode,
+                    col_client,
+                    col_doc,
+                    col_date,
+                    col_agence,
+                    col_ca_magasin
+                )
+                recipients_url = quote(clean_visible(internal_recipients), safe="@.;,")
+                internal_mailto = f"mailto:{recipients_url}?subject={quote(internal_subject)}&body={quote(internal_body)}"
+
+                st.link_button("📨 Préparer le mail interne", internal_mailto)
+                st.download_button(
+                    "📄 Télécharger le récap en TXT",
+                    internal_body.encode("utf-8"),
+                    f"suivi_attente_{safe_filename(periode)}.txt",
+                    "text/plain",
+                    key="download_attente_internal_summary"
+                )
 
         cols_show = [
             col_client,
@@ -2479,7 +2896,9 @@ def afficher_dossiers_en_attente(tab):
             col_agence,
             col_ca_magasin,
             "Remise %",
-            "OPC"
+            "OPC",
+            "Motif d'attente",
+            "Détail motif"
         ]
         cols_show = list(dict.fromkeys([c for c in cols_show if c and c in filtered.columns]))
         affichage = filtered[cols_show].copy()
@@ -2629,7 +3048,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "📋 Listes complètes",
             "⚙️ Utilisateurs"
         ]
-        active_page = st.segmented_control(
+        active_page = st.pills(
             "Navigation",
             pages,
             default=pages[0],
@@ -2646,7 +3065,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "🏢 Mon agence",
             "👔 Commission agence"
         ]
-        active_page = st.segmented_control(
+        active_page = st.pills(
             "Navigation",
             pages,
             default=pages[0],
@@ -2661,7 +3080,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "👤 Mes chiffres",
             "📆 Annuel"
         ]
-        active_page = st.segmented_control(
+        active_page = st.pills(
             "Navigation",
             pages,
             default=pages[0],
@@ -2803,10 +3222,27 @@ if st.session_state.get("df_vendeurs") is not None:
                 col_date = st.session_state.col_date
                 col_rem = st.session_state.col_rem
                 col_op = st.session_state.col_op
+                motifs_attente = load_motifs_attente()
 
                 afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode)
 
                 detail_calc = detail.copy()
+                detail_calc["_ATTENTE_KEY_"] = detail_calc.apply(
+                    lambda row: make_attente_tracking_key(row, col_client, col_doc, col_agence, col_ca_magasin, col_catalogue),
+                    axis=1
+                )
+                detail_calc["Motif d'attente"] = detail_calc.apply(
+                    lambda row: clean_visible(motifs_attente.get(row.get("_ATTENTE_KEY_", ""), {}).get("motif", ""))
+                    if str(row.get("Statut", "")).startswith("⏳") else "",
+                    axis=1
+                )
+                def statut_avec_motif(row):
+                    motif = clean_visible(row.get("Motif d'attente", ""))
+                    if motif:
+                        return "⏳ En attente ⓘ"
+                    return row.get("Statut", "")
+
+                detail_calc["Statut"] = detail_calc.apply(statut_avec_motif, axis=1)
 
                 for c in [col_vente, col_ca_magasin, col_catalogue, col_rem]:
                     if c and c in detail_calc.columns:
@@ -2945,21 +3381,11 @@ if st.session_state.get("df_vendeurs") is not None:
                         return "background-color: #FECACA; color: #991B1B; font-weight: 700"
                     return ""
 
-                styled_detail = (
-                    detail_affichage.style
-                    .map(
-                        color_bonus_malus,
-                        subset=["Bonus / Malus"] if "Bonus / Malus" in detail_affichage.columns else []
-                    )
-                    .format({
-                        "TOTAL VENTE": "{:,.2f} €",
-                        "Vente HT hors acompte": "{:,.2f} €",
-                        "Remise %": "{:.2f} %",
-                        "Bonus / Malus": "{:,.2f} €",
-                    })
+                render_table_with_status_tooltips(
+                    detail_affichage,
+                    tooltip_by_index=detail_calc["Motif d'attente"].to_dict(),
+                    height=600
                 )
-
-                st.dataframe(styled_detail, use_container_width=True, height=600)
             else:
                 st.info("Aucune affaire trouvée pour ce vendeur.")
 
