@@ -6,6 +6,8 @@ from pathlib import Path
 import pickle
 import json
 import base64
+import re
+import os
 from datetime import datetime
 
 # ====================== CONFIG ======================
@@ -327,6 +329,24 @@ def vendeur_mask(df, vendeur, colonnes_commerciaux):
     return mask
 
 
+def list_commerciaux_row(row, colonnes_commerciaux):
+    noms = []
+    seen = set()
+
+    for col in colonnes_commerciaux:
+        if not col or col not in row.index:
+            continue
+
+        nom = clean_visible(row.get(col))
+        k = normalize_key(nom)
+
+        if nom and k not in seen:
+            noms.append(nom)
+            seen.add(k)
+
+    return " / ".join(noms)
+
+
 def count_vendeurs_row(row, colonnes_commerciaux):
     nb = 0
     for col in colonnes_commerciaux:
@@ -595,6 +615,65 @@ def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, c
     return attente_detail
 
 
+def get_periode_start(periode):
+    mois, annee = periode_to_month_year(periode)
+    if not mois or not annee:
+        return None
+    return pd.Timestamp(year=annee, month=mois, day=1)
+
+
+def collect_affaires_hors_periode(detail, col_client, col_doc, col_date, periode):
+    periode_start = get_periode_start(periode)
+
+    if detail.empty or periode_start is None or not col_date or col_date not in detail.columns:
+        return []
+
+    rows = []
+    seen = set()
+
+    for _, row in detail.iterrows():
+        date_doc = pd.to_datetime(row.get(col_date), errors="coerce")
+
+        if pd.isna(date_doc) or date_doc >= periode_start:
+            continue
+
+        client = clean_visible(row.get(col_client)) if col_client and col_client in row.index else ""
+        doc = clean_visible(row.get(col_doc)) if col_doc and col_doc in row.index else ""
+        client = client or "(client/affaire inconnue)"
+
+        key = "|".join([
+            normalize_key(client),
+            normalize_key(doc),
+            date_doc.strftime("%Y%m%d")
+        ])
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        label = client
+        if doc:
+            label += f" (Doc: {doc})"
+        label += f" - {date_doc.strftime('%d/%m/%Y')}"
+        rows.append(label)
+
+    return rows
+
+
+def afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode):
+    affaires = collect_affaires_hors_periode(detail, col_client, col_doc, col_date, periode)
+
+    if not affaires:
+        return
+
+    st.warning(
+        f"⚠️ Certaines ventes ont une date de document antérieure à la période {periode}. "
+        "Êtes-vous sûr que cette vente doit être comptabilisée pour cette période ?"
+    )
+    st.markdown("\n".join([f"- {affaire}" for affaire in affaires]))
+
+
 def safe_filename(name):
     return (
         str(name)
@@ -609,6 +688,165 @@ def safe_filename(name):
         .replace("|", "-")
         .strip()
     )
+
+
+def pdf_text(value):
+    if pd.isna(value):
+        return ""
+    text = str(value)
+    text = text.replace("✅", "").replace("⏳", "").replace("🎯", "").replace("🌍", "")
+    text = text.replace("📉", "").replace("📊", "").replace("💰", "")
+    text = " ".join(text.split())
+    return text
+
+
+def pdf_escape(value):
+    text = pdf_text(value)
+    text = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return text
+
+
+def pdf_clip_text(text, max_chars):
+    text = pdf_text(text)
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)] + "..."
+
+
+def pdf_format_value(value):
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.strftime("%d/%m/%Y")
+    return pdf_text(value)
+
+
+def make_simple_pdf(title, metrics, df):
+    page_w, page_h = 841.89, 595.28
+    margin = 24
+    row_h = 16
+    header_h = 18
+    top_y = page_h - margin
+    bottom_y = margin
+
+    cols = list(df.columns)
+    preferred_widths = {
+        "Client / Référence affaire": 118,
+        "Commerciaux": 122,
+        "N° Document": 58,
+        "Date document": 54,
+        "Statut": 48,
+        "Agence": 58,
+        "TOTAL VENTE": 58,
+        "Vente HT hors acompte": 72,
+        "Total ventes avant remise": 76,
+        "Remise PP": 58,
+        "Remise %": 48,
+        "OPC": 28,
+        "Bonus / Malus": 62,
+    }
+    col_widths = [preferred_widths.get(col, 58) for col in cols]
+    available_w = page_w - (margin * 2)
+    total_w = sum(col_widths)
+
+    if total_w > available_w:
+        factor = available_w / total_w
+        col_widths = [max(24, w * factor) for w in col_widths]
+
+    pages = []
+    commands = []
+
+    def add_text(x, y, text, size=8, bold=False):
+        font = "F2" if bold else "F1"
+        commands.append(f"BT /{font} {size} Tf {x:.2f} {y:.2f} Td ({pdf_escape(text)}) Tj ET")
+
+    def add_line(x1, y1, x2, y2, width=0.4):
+        commands.append(f"{width:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
+
+    def add_rect(x, y, w, h, fill=None):
+        if fill:
+            commands.append(f"{fill} rg {x:.2f} {y:.2f} {w:.2f} {h:.2f} re f 0 0 0 rg")
+        commands.append(f"0.35 w {x:.2f} {y:.2f} {w:.2f} {h:.2f} re S")
+
+    def new_page():
+        nonlocal commands
+        if commands:
+            pages.append(commands)
+        commands = []
+        add_text(margin, top_y - 8, title, size=14, bold=True)
+        y = top_y - 28
+        metric_line = " | ".join([f"{k}: {v}" for k, v in metrics.items()])
+        add_text(margin, y, metric_line, size=8, bold=True)
+        y -= 22
+
+        x = margin
+        for col, w in zip(cols, col_widths):
+            add_rect(x, y - header_h + 5, w, header_h, fill="0.88 0.90 1")
+            add_text(x + 2, y - 7, pdf_clip_text(col, int(w / 4.3)), size=6, bold=True)
+            x += w
+        return y - header_h + 5
+
+    y = new_page()
+    for _, row in df.iterrows():
+        if y - row_h < bottom_y:
+            y = new_page()
+
+        x = margin
+        for col, w in zip(cols, col_widths):
+            add_rect(x, y - row_h, w, row_h)
+            value = pdf_format_value(row.get(col, ""))
+            add_text(x + 2, y - 11, pdf_clip_text(value, int(w / 3.8)), size=6)
+            x += w
+        y -= row_h
+
+    pages.append(commands)
+
+    objects = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+
+    page_refs = " ".join([f"{3 + i * 2} 0 R" for i in range(len(pages))])
+    objects.append(f"<< /Type /Pages /Kids [{page_refs}] /Count {len(pages)} >>".encode("cp1252", errors="replace"))
+
+    for idx, page_commands in enumerate(pages):
+        page_obj_num = 3 + idx * 2
+        content_obj_num = page_obj_num + 1
+        page_obj = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.2f} {page_h:.2f}] "
+            f"/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> "
+            f"/F2 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >> >> >> "
+            f"/Contents {content_obj_num} 0 R >>"
+        )
+        objects.append(page_obj.encode("cp1252", errors="replace"))
+        stream = "\n".join(page_commands).encode("cp1252", errors="replace")
+        objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
+
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{i} 0 obj\n".encode("ascii"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+
+    xref_pos = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode("ascii")
+    )
+    return bytes(pdf)
+
+
+def save_pdf_export(pdf_bytes, filename):
+    export_dir = DATA_DIR / "exports_pdf"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    file_path = export_dir / filename
+    file_path.write_bytes(pdf_bytes)
+    return file_path.resolve()
+
+
+def is_render_env():
+    return bool(os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_ID"))
 
 
 def save_periode(periode, data):
@@ -1770,11 +2008,18 @@ if st.session_state.get("df_vendeurs") is not None:
                 col_rem = st.session_state.col_rem
                 col_op = st.session_state.col_op
 
+                afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode)
+
                 detail_calc = detail.copy()
 
                 for c in [col_vente, col_ca_magasin, col_catalogue, col_rem]:
                     if c and c in detail_calc.columns:
                         detail_calc[c] = pd.to_numeric(detail_calc[c], errors="coerce").fillna(0)
+
+                detail_calc["Commerciaux"] = detail_calc.apply(
+                    lambda row: list_commerciaux_row(row, colonnes_commerciaux),
+                    axis=1
+                )
 
                 detail_calc["Nombre de vendeurs"] = detail_calc.apply(
                     lambda row: count_vendeurs_row(row, colonnes_commerciaux),
@@ -1810,6 +2055,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
                 cols_show = [
                     col_client,
+                    "Commerciaux",
                     col_doc,
                     col_date,
                     "Statut",
@@ -1843,6 +2089,50 @@ if st.session_state.get("df_vendeurs") is not None:
                 for c in ["TOTAL VENTE", "Vente HT hors acompte", "Remise %", "Bonus / Malus"]:
                     if c in detail_affichage.columns:
                         detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
+
+                if "Date document" in detail_affichage.columns:
+                    detail_affichage["Date document"] = pd.to_datetime(
+                        detail_affichage["Date document"],
+                        errors="coerce"
+                    ).dt.strftime("%d/%m/%Y").fillna("")
+
+                pdf_metrics = {
+                    "CA OK": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
+                    "CA attente": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
+                    "CA Total": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
+                    "Commission": f"{to_float(data.get('commission_eur', 0)):,.2f} EUR",
+                    vendeur_remise_label: f"{to_float(data.get(vendeur_remise_col, 0)):,.2f} %",
+                    vendeur_bonus_malus_label: f"{to_float(data.get(vendeur_bonus_malus_col, 0)):,.2f} EUR",
+                }
+                pdf_bytes = make_simple_pdf(
+                    f"Detail des affaires - {vendeur} - {periode}",
+                    pdf_metrics,
+                    detail_affichage.reset_index(drop=True)
+                )
+                pdf_filename = f"detail_vendeur_{safe_filename(vendeur)}_{safe_filename(periode)}.pdf"
+                pdf_container = st.container()
+                if is_render_env():
+                    pdf_container.download_button(
+                        "📄 Télécharger PDF vendeur",
+                        pdf_bytes,
+                        pdf_filename,
+                        "application/pdf",
+                        key=f"pdf_vendeur_{safe_filename(vendeur)}",
+                        on_click="ignore"
+                    )
+                else:
+                    pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
+                    pdf_col1.download_button(
+                        "📄 Télécharger PDF vendeur",
+                        pdf_bytes,
+                        pdf_filename,
+                        "application/pdf",
+                        key=f"pdf_vendeur_{safe_filename(vendeur)}",
+                        on_click="ignore"
+                    )
+                    if pdf_col2.button("💾 Générer PDF vendeur", key=f"save_pdf_vendeur_{safe_filename(vendeur)}"):
+                        pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
+                        st.success(f"PDF généré : {pdf_path}")
 
                 def color_bonus_malus(val):
                     try:
@@ -1918,6 +2208,8 @@ if st.session_state.get("df_vendeurs") is not None:
             col_agence = st.session_state.col_agence
             key_cols = st.session_state.key_cols
             col_client = st.session_state.col_client
+            col_doc = st.session_state.col_doc
+            col_date = st.session_state.col_date
             col_vente = st.session_state.col_vente
             col_ca_magasin = st.session_state.col_ca_magasin
             col_catalogue = st.session_state.col_catalogue
@@ -1942,8 +2234,21 @@ if st.session_state.get("df_vendeurs") is not None:
             detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
 
             if not detail.empty:
+                afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode)
+
+                colonnes_commerciaux = [
+                    st.session_state.col_com1,
+                    st.session_state.col_com2,
+                    st.session_state.col_com3
+                ]
+                detail["Commerciaux"] = detail.apply(
+                    lambda row: list_commerciaux_row(row, colonnes_commerciaux),
+                    axis=1
+                )
+
                 cols_show = [
                     st.session_state.col_client,
+                    "Commerciaux",
                     st.session_state.col_doc,
                     st.session_state.col_date,
                     "Statut",
@@ -1966,6 +2271,49 @@ if st.session_state.get("df_vendeurs") is not None:
                 ]:
                     if c and c in detail_affichage.columns:
                         detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
+
+                if st.session_state.col_date and st.session_state.col_date in detail_affichage.columns:
+                    detail_affichage[st.session_state.col_date] = pd.to_datetime(
+                        detail_affichage[st.session_state.col_date],
+                        errors="coerce"
+                    ).dt.strftime("%d/%m/%Y").fillna("")
+
+                pdf_metrics = {
+                    "CA OK agence": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
+                    "CA attente agence": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
+                    "CA Total agence": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
+                    "CA magasin OK": f"{to_float(data.get('ca_magasin_ok', 0)):,.2f} EUR",
+                    "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
+                }
+                pdf_bytes = make_simple_pdf(
+                    f"Detail des affaires agence - {agence} - {periode}",
+                    pdf_metrics,
+                    detail_affichage.reset_index(drop=True)
+                )
+                pdf_filename = f"detail_agence_{safe_filename(agence)}_{safe_filename(periode)}.pdf"
+                pdf_container = st.container()
+                if is_render_env():
+                    pdf_container.download_button(
+                        "📄 Télécharger PDF agence",
+                        pdf_bytes,
+                        pdf_filename,
+                        "application/pdf",
+                        key=f"pdf_agence_{safe_filename(agence)}",
+                        on_click="ignore"
+                    )
+                else:
+                    pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
+                    pdf_col1.download_button(
+                        "📄 Télécharger PDF agence",
+                        pdf_bytes,
+                        pdf_filename,
+                        "application/pdf",
+                        key=f"pdf_agence_{safe_filename(agence)}",
+                        on_click="ignore"
+                    )
+                    if pdf_col2.button("💾 Générer PDF agence", key=f"save_pdf_agence_{safe_filename(agence)}"):
+                        pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
+                        st.success(f"PDF généré : {pdf_path}")
 
                 st.dataframe(detail_affichage, use_container_width=True, height=600)
             else:
