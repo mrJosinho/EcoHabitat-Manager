@@ -10,7 +10,9 @@ import re
 import os
 import io
 import zipfile
+import unicodedata
 from datetime import datetime
+from openpyxl import load_workbook
 
 # ====================== CONFIG ======================
 
@@ -231,6 +233,13 @@ def normalize_key(s):
     return " ".join(t.strip().upper().split())
 
 
+def strip_accents(s):
+    return "".join(
+        c for c in unicodedata.normalize("NFD", str(s))
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def clean_visible(s):
     if pd.isna(s):
         return ""
@@ -246,7 +255,7 @@ def to_float(value, default=0.0):
 
 
 def is_excluded_from_evp(nom):
-    k = normalize_key(nom)
+    k = strip_accents(normalize_key(nom))
     return k in [
         "LAVISSE GUILLAUME",
         "LAVISSE FABIEN",
@@ -254,6 +263,33 @@ def is_excluded_from_evp(nom):
         "LUCCHIN JOSEPH",
         "PETIT LILIAN"
     ]
+
+
+def is_responsable_agence(nom):
+    return strip_accents(normalize_key(nom)) in [
+        "AYACHE ADEL",
+        "EL GHAZOUANI NAHIM",
+        "VUE JONATHAN",
+    ]
+
+
+def resolve_nom_evp(nom):
+    k = strip_accents(normalize_key(nom))
+    aliases = {
+        "LEMMONIER HENRI": "LEMONNIER HENRI",
+        "LEMONIER HENRI": "LEMONNIER HENRI",
+        "LEMONNIER HENRI": "LEMONNIER HENRI",
+        "ELGHAZOUANI NAHIM": "EL GHAZOUANI NAHIM",
+        "EL GHAZOUANI NAHIM": "EL GHAZOUANI NAHIM",
+        "ADEL AYACHE": "AYACHE ADEL",
+        "AYACHE ADEL": "AYACHE ADEL",
+        "BALDACCHINO ANTOINE": "BALDACCHINO ANTOINE",
+        "AGASSE ESTEBAN": "AGASSE ESTEBAN",
+        "DUSSART ROBIN": "DUSSART ROBIN",
+        "RENOUT KEVIN": "RENOUT KEVIN",
+        "VUE JONATHAN": "VUE JONATHAN",
+    }
+    return aliases.get(k, k)
 
 
 def prime_magasin(ca_ht):
@@ -615,6 +651,13 @@ def make_affaire_match_key(row, col_client, col_agence, col_vente, col_ca_magasi
     return "|".join(parts)
 
 
+def make_affaire_client_agence_key(row, col_client, col_agence):
+    return "|".join([
+        normalize_key(row.get(col_client, "")) if col_client else "",
+        normalize_key(row.get(col_agence, "")) if col_agence else "",
+    ])
+
+
 def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
     if ok_detail.empty or attente_detail.empty:
         return attente_detail
@@ -644,6 +687,22 @@ def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, c
         ok_keys = set(ok_detail["_AFFAIRE_KEY_"])
         attente_detail = attente_detail[~attente_detail["_AFFAIRE_KEY_"].isin(ok_keys)].copy()
         attente_detail = attente_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
+
+    if col_client and col_client in ok_detail.columns and col_client in attente_detail.columns:
+        ok_detail["_AFFAIRE_CLIENT_AGENCE_KEY_"] = ok_detail.apply(
+            lambda row: make_affaire_client_agence_key(row, col_client, col_agence),
+            axis=1
+        )
+        attente_detail["_AFFAIRE_CLIENT_AGENCE_KEY_"] = attente_detail.apply(
+            lambda row: make_affaire_client_agence_key(row, col_client, col_agence),
+            axis=1
+        )
+
+        ok_client_agence_keys = set(ok_detail["_AFFAIRE_CLIENT_AGENCE_KEY_"])
+        attente_detail = attente_detail[
+            ~attente_detail["_AFFAIRE_CLIENT_AGENCE_KEY_"].isin(ok_client_agence_keys)
+        ].copy()
+        attente_detail = attente_detail.drop(columns=["_AFFAIRE_CLIENT_AGENCE_KEY_"], errors="ignore")
 
     return attente_detail
 
@@ -1148,6 +1207,93 @@ def make_pdf_zip(items):
     return buffer.getvalue()
 
 
+def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
+    target_sheet = sheet_name_evp_for_next_month(periode)
+    if not target_sheet:
+        return None, f"Période non reconnue : {periode}", []
+
+    wb = load_workbook(evp_file)
+    sheet_lookup = {strip_accents(normalize_key(ws.title)): ws for ws in wb.worksheets}
+    ws = sheet_lookup.get(strip_accents(normalize_key(target_sheet)))
+
+    if ws is None:
+        return None, f"Onglet EVP introuvable : {target_sheet}", []
+
+    row_by_name = {}
+    for row_idx in range(1, ws.max_row + 1):
+        nom = clean_visible(ws.cell(row=row_idx, column=2).value)
+        key = resolve_nom_evp(nom)
+        if key and key not in row_by_name:
+            row_by_name[key] = row_idx
+
+    absents = []
+
+    if df_vendeurs is not None and not df_vendeurs.empty:
+        for _, vendeur in df_vendeurs.iterrows():
+            nom = vendeur.get("Commercial", "")
+            if is_excluded_from_evp(nom):
+                continue
+
+            key = resolve_nom_evp(nom)
+            row_idx = row_by_name.get(key)
+
+            if not row_idx:
+                absents.append(clean_visible(nom) or key)
+                continue
+
+            ca_ok = to_float(vendeur.get("ca_ok", 0))
+            commission_pct = to_float(vendeur.get("commission_pct", 0))
+            commission_eur = to_float(vendeur.get("commission_eur", 0))
+            points_perdus = to_float(vendeur.get("points_perdus", 0))
+
+            ws.cell(row=row_idx, column=5).value = ca_ok
+            ws.cell(row=row_idx, column=5).number_format = '#,##0.00 €'
+            ws.cell(row=row_idx, column=6).value = commission_pct / 100
+            ws.cell(row=row_idx, column=6).number_format = '0.00%'
+
+            if commission_pct == 0:
+                ws.cell(row=row_idx, column=7).value = None
+                ws.cell(row=row_idx, column=8).value = None
+            else:
+                montant_cell = ws.cell(row=row_idx, column=7)
+                if not isinstance(montant_cell.value, str) or not montant_cell.value.startswith("="):
+                    montant_cell.value = commission_eur
+                    montant_cell.number_format = '#,##0.00 €'
+                ws.cell(row=row_idx, column=7).number_format = '#,##0.00 €'
+                ws.cell(row=row_idx, column=8).value = points_perdus / 100
+                ws.cell(row=row_idx, column=8).number_format = '0.00%'
+
+            ws.cell(row=row_idx, column=14).value = None
+
+    if df_directeurs is not None and not df_directeurs.empty:
+        for _, directeur in df_directeurs.iterrows():
+            nom = directeur.get("directeur", "")
+            key = resolve_nom_evp(nom)
+            row_idx = row_by_name.get(key)
+
+            if not row_idx:
+                absents.append(clean_visible(nom) or key)
+                continue
+
+            montant = to_float(directeur.get("commission_magasin_eur", 0))
+            if montant > 0:
+                ws.cell(row=row_idx, column=10).value = montant
+                ws.cell(row=row_idx, column=10).number_format = '#,##0.00 €'
+            else:
+                ws.cell(row=row_idx, column=10).value = None
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue(), None, sorted(set(absents))
+
+
 def save_periode(periode, data):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
     with open(file_path, "wb") as f:
@@ -1160,6 +1306,41 @@ def load_periode(periode):
         with open(file_path, "rb") as f:
             return pickle.load(f)
     return None
+
+
+def load_periode_preserve_ui(periode):
+    saved_data = load_periode(periode)
+    if not saved_data:
+        return False
+
+    ui_keys = [
+        "active_page_admin",
+        "active_page_directeur",
+        "active_page_vendeur",
+        "vendeur_select",
+        "agence_select",
+    ]
+    preserved_ui = {
+        key: st.session_state.get(key)
+        for key in ui_keys
+        if key in st.session_state
+    }
+
+    st.session_state.update(saved_data)
+
+    for key, value in preserved_ui.items():
+        if value is not None:
+            st.session_state[key] = value
+
+    return True
+
+
+def delete_periode(periode):
+    file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
+    if file_path.exists():
+        file_path.unlink()
+        return True
+    return False
 
 
 def list_periodes():
@@ -1210,6 +1391,35 @@ def periode_to_month_year(periode):
 def periode_sort_key(periode):
     mois, annee = periode_to_month_year(periode)
     return (annee or 0, mois or 0)
+
+
+def sheet_name_evp_for_next_month(periode):
+    mois, annee = periode_to_month_year(periode)
+    if not mois or not annee:
+        return None
+
+    next_month = mois + 1
+    next_year = annee
+
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
+
+    mois_names = {
+        1: "JANVIER",
+        2: "FEVRIER",
+        3: "MARS",
+        4: "AVRIL",
+        5: "MAI",
+        6: "JUIN",
+        7: "JUILLET",
+        8: "AOUT",
+        9: "SEPTEMBRE",
+        10: "OCTOBRE",
+        11: "NOVEMBRE",
+        12: "DECEMBRE",
+    }
+    return f"{mois_names[next_month]} {next_year}"
 
 
 def is_periode_comptable_annuelle(periode, annee_selectionnee, use_m2=True):
@@ -1401,10 +1611,6 @@ user = st.session_state.user
 role = user["role"]
 
 
-# ====================== HEADER ======================
-
-st.markdown('<div class="eco-header">', unsafe_allow_html=True)
-
 col1, col2 = st.columns([1, 6])
 
 with col1:
@@ -1414,15 +1620,8 @@ with col1:
         st.markdown("🏠")
 
 with col2:
-    st.markdown('<div class="eco-title">Espace Commissions EcoHabitat</div>', unsafe_allow_html=True)
+    st.markdown('<div class="eco-title">gesCom EcoHabitat</div>', unsafe_allow_html=True)
     st.markdown('<div class="eco-subtitle">L’excellence au service de votre habitat</div>', unsafe_allow_html=True)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-st.caption(
-    "Logique : Vendeurs = colonne Q | Agences = colonne I | "
-    "Remise commission hors OPC | Directeur agence = 1% CA agence + prime"
-)
 
 st.sidebar.success(f"Connecté : {user['nom']} ({role})")
 
@@ -1449,12 +1648,40 @@ if st.sidebar.button("📥 Charger la période"):
     if not periode_load:
         st.warning("Sélectionne une période.")
     else:
-        saved_data = load_periode(periode_load)
-        if saved_data:
-            st.session_state.update(saved_data)
+        if load_periode_preserve_ui(periode_load):
             st.success(f"✅ Période {periode_load} chargée.")
         else:
             st.error("❌ Impossible de charger cette période.")
+
+if role == "admin" and periodes_dispo:
+    with st.sidebar.expander("🗑️ Supprimer une période", expanded=False):
+        periode_delete = st.selectbox(
+            "Période à supprimer",
+            [""] + periodes_dispo,
+            key="periode_delete_select"
+        )
+        confirm_delete = st.checkbox(
+            "Je confirme la suppression",
+            key="periode_delete_confirm"
+        )
+
+        if st.button(
+            "Supprimer la période",
+            disabled=not periode_delete or not confirm_delete,
+            key="periode_delete_button"
+        ):
+            if delete_periode(periode_delete):
+                if st.session_state.get("periode") == periode_delete:
+                    keys_to_clear = [
+                        "df_vendeurs", "df_agences", "df_directeurs",
+                        "df_ok", "df_c", "periode"
+                    ]
+                    for key in keys_to_clear:
+                        st.session_state.pop(key, None)
+                st.success(f"✅ Période {periode_delete} supprimée.")
+                st.rerun()
+            else:
+                st.error("❌ Impossible de supprimer cette période.")
 
 
 # ====================== IMPORT ADMIN ======================
@@ -1823,15 +2050,15 @@ if role == "admin":
 # ====================== PARAMÈTRE ANNUEL ======================
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Paramètre annuel")
-use_m2_rule = st.sidebar.checkbox(
-    "Règle M-2",
-    value=True,
-    help="Filtre l'analyse annuelle sur les mois comptablement finalisés."
-)
+with st.sidebar.expander("⚙️ Paramètre annuel", expanded=False):
+    use_m2_rule = st.checkbox(
+        "Règle M-2",
+        value=True,
+        help="Filtre l'analyse annuelle sur les mois comptablement finalisés."
+    )
 
-if not use_m2_rule:
-    st.sidebar.caption("Mode test : M-2 désactivé")
+    if not use_m2_rule:
+        st.caption("Mode test : M-2 désactivé")
 
 
 # ====================== BACK OFFICE USERS ======================
@@ -1991,6 +2218,8 @@ def afficher_annuel(tab):
             df_all_agences["periode"].isin(periodes_comptables)
         ].copy() if not df_all_agences.empty else pd.DataFrame()
 
+        df_v_classement_all = df_v.copy()
+
         if role == "vendeur":
             df_v = df_v[
                 df_v["Commercial"].apply(normalize_key) == normalize_key(user["nom"])
@@ -2024,9 +2253,12 @@ def afficher_annuel(tab):
 
         st.divider()
 
-        if not df_v.empty:
+        if not df_v_classement_all.empty:
+            df_classement_source = df_v_classement_all[
+                ~df_v_classement_all["Commercial"].apply(is_responsable_agence)
+            ].copy()
             df_classement_vendeurs = (
-                df_v
+                df_classement_source
                 .groupby("Commercial", as_index=False)
                 .agg({
                     "ca_ok": "sum",
@@ -2365,10 +2597,29 @@ if st.session_state.get("df_vendeurs") is not None:
         df_agences = df_agences_all
         df_directeurs = df_directeurs_all
 
-    st.subheader(f"📅 Période : **{periode}**")
+    periode_title_col, periode_select_col = st.columns([2, 1])
+    with periode_title_col:
+        st.subheader(f"📅 Période : **{periode}**")
+
+    periodes_main = sorted(list_periodes(), key=periode_sort_key)
+    if periodes_main:
+        current_periode_index = periodes_main.index(periode) if periode in periodes_main else 0
+        with periode_select_col:
+            periode_main_select = st.selectbox(
+                "Changer de période",
+                periodes_main,
+                index=current_periode_index,
+                key="periode_main_select"
+            )
+
+        if periode_main_select != periode:
+            if load_periode_preserve_ui(periode_main_select):
+                st.rerun()
+            else:
+                st.error("❌ Impossible de charger cette période.")
 
     if role == "admin":
-        tabs = st.tabs([
+        pages = [
             "📊 Dashboard",
             "⏳ En attente",
             "📆 Annuel",
@@ -2377,21 +2628,48 @@ if st.session_state.get("df_vendeurs") is not None:
             "👔 Directeurs",
             "📋 Listes complètes",
             "⚙️ Utilisateurs"
-        ])
+        ]
+        active_page = st.segmented_control(
+            "Navigation",
+            pages,
+            default=pages[0],
+            label_visibility="collapsed",
+            key="active_page_admin",
+            width="stretch"
+        )
+        active_page = active_page or st.session_state.get("active_page_admin") or pages[0]
 
     elif role == "directeur_agence":
-        tabs = st.tabs([
+        pages = [
             "👤 Mes chiffres",
             "📆 Annuel",
             "🏢 Mon agence",
             "👔 Commission agence"
-        ])
+        ]
+        active_page = st.segmented_control(
+            "Navigation",
+            pages,
+            default=pages[0],
+            label_visibility="collapsed",
+            key="active_page_directeur",
+            width="stretch"
+        )
+        active_page = active_page or st.session_state.get("active_page_directeur") or pages[0]
 
     else:
-        tabs = st.tabs([
+        pages = [
             "👤 Mes chiffres",
             "📆 Annuel"
-        ])
+        ]
+        active_page = st.segmented_control(
+            "Navigation",
+            pages,
+            default=pages[0],
+            label_visibility="collapsed",
+            key="active_page_vendeur",
+            width="stretch"
+        )
+        active_page = active_page or st.session_state.get("active_page_vendeur") or pages[0]
 
     # ====================== FONCTIONS AFFICHAGE ======================
 
@@ -2404,7 +2682,15 @@ if st.session_state.get("df_vendeurs") is not None:
             if vendeur_forced:
                 vendeur = vendeur_forced
             else:
-                vendeur = st.selectbox("Sélectionner un commercial", sorted(df_vendeurs["Commercial"]), key="vendeur_select")
+                vendeurs_options = sorted(df_vendeurs["Commercial"])
+                vendeur_precedent = st.session_state.get("vendeur_select")
+                vendeur_index = vendeurs_options.index(vendeur_precedent) if vendeur_precedent in vendeurs_options else 0
+                vendeur = st.selectbox(
+                    "Sélectionner un commercial",
+                    vendeurs_options,
+                    index=vendeur_index,
+                    key="vendeur_select"
+                )
 
             data = df_vendeurs[df_vendeurs["Commercial"].apply(normalize_key) == normalize_key(vendeur)]
 
@@ -2413,6 +2699,29 @@ if st.session_state.get("df_vendeurs") is not None:
                 return
 
             data = data.iloc[0]
+
+            projection_total = st.toggle(
+                "Afficher une projection remise / commission sur CA total",
+                value=False,
+                key=f"projection_total_{safe_filename(vendeur)}"
+            )
+
+            if projection_total:
+                remise_commission_affichee = to_float(data.get("remise_hors_opc_global_pct", data.get("remise_global_pct", 0)))
+                base_affichee, points_affiches, commission_pct_affichee, commission_eur_affichee = calculate_commission(
+                    to_float(data.get("ca_total", 0)),
+                    remise_commission_affichee
+                )
+                commission_card_label = "💰 Commission projetée"
+                mode_commission_label = "Projection sur CA total"
+            else:
+                remise_commission_affichee = to_float(data.get("remise_hors_opc_pct", 0))
+                base_affichee = to_float(data.get("base_commission_pct", 0))
+                points_affiches = to_float(data.get("points_perdus", 0))
+                commission_pct_affichee = to_float(data.get("commission_pct", 0))
+                commission_eur_affichee = to_float(data.get("commission_eur", 0))
+                commission_card_label = "💰 Commission"
+                mode_commission_label = "Rémunération réelle sur CA OK"
 
             c1, c2, c3, c4 = st.columns(4)
 
@@ -2426,13 +2735,14 @@ if st.session_state.get("df_vendeurs") is not None:
                 card("📌 CA Total", f"{data['ca_total']:,.2f} €")
 
             with c4:
-                card("💰 Commission", f"{data['commission_eur']:,.2f} €")
+                card(commission_card_label, f"{commission_eur_affichee:,.2f} €")
 
             st.write(
-                f"Remise commission hors OPC : **{data.get('remise_hors_opc_pct', 0)} %** | "
-                f"Base commission : **{data.get('base_commission_pct', 0)} %** | "
-                f"Points perdus : **{data.get('points_perdus', 0)}** | "
-                f"Commission définitive : **{data.get('commission_pct', 0)} %**"
+                f"{mode_commission_label} | "
+                f"Remise commission hors OPC : **{remise_commission_affichee:,.2f} %** | "
+                f"Base commission : **{base_affichee:,.0f} %** | "
+                f"Points perdus : **{points_affiches:,.0f}** | "
+                f"Commission définitive : **{commission_pct_affichee:,.0f} %**"
             )
 
             vendeur_bonus_malus_global = st.toggle(
@@ -2662,7 +2972,15 @@ if st.session_state.get("df_vendeurs") is not None:
             if agence_forced:
                 agence = agence_forced
             else:
-                agence = st.selectbox("Sélectionner une agence", sorted(df_agences["agence"]), key="agence_select")
+                agences_options = sorted(df_agences["agence"])
+                agence_precedente = st.session_state.get("agence_select")
+                agence_index = agences_options.index(agence_precedente) if agence_precedente in agences_options else 0
+                agence = st.selectbox(
+                    "Sélectionner une agence",
+                    agences_options,
+                    index=agence_index,
+                    key="agence_select"
+                )
 
             data = df_agences[df_agences["agence"].apply(normalize_key) == normalize_key(agence)]
 
@@ -2813,7 +3131,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
     if role == "admin":
 
-        with tabs[0]:
+        if active_page == "📊 Dashboard":
             total_ok = df_vendeurs["ca_ok"].sum()
             total_attente = df_vendeurs["ca_attente"].sum()
             total_global = df_vendeurs["ca_total"].sum()
@@ -2887,12 +3205,16 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        afficher_dossiers_en_attente(tabs[1])
-        afficher_annuel(tabs[2])
-        afficher_vendeur(tabs[3])
-        afficher_agence(tabs[4])
+        if active_page == "⏳ En attente":
+            afficher_dossiers_en_attente(st.container())
+        if active_page == "📆 Annuel":
+            afficher_annuel(st.container())
+        if active_page == "👤 Par Vendeur":
+            afficher_vendeur(st.container())
+        if active_page == "🏢 Par Agence":
+            afficher_agence(st.container())
 
-        with tabs[5]:
+        if active_page == "👔 Directeurs":
             if df_directeurs.empty:
                 st.info("Aucune commission magasin calculée.")
             else:
@@ -2901,7 +3223,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        with tabs[6]:
+        if active_page == "📋 Listes complètes":
             st.subheader("👤 Vendeurs")
             st.dataframe(format_df_vendeurs(df_vendeurs).sort_values("CA OK", ascending=False), use_container_width=True)
 
@@ -2913,27 +3235,76 @@ if st.session_state.get("df_vendeurs") is not None:
             if not df_directeurs.empty:
                 st.dataframe(format_df_directeurs(df_directeurs).sort_values("Commission magasin €", ascending=False), use_container_width=True)
 
-        with tabs[7]:
+        if active_page == "⚙️ Utilisateurs":
             afficher_admin_users()
 
     elif role == "directeur_agence":
-        afficher_vendeur(tabs[0], vendeur_forced=user["nom"])
-        afficher_annuel(tabs[1])
-        afficher_agence(tabs[2], agence_forced=user["agence"])
+        if active_page == "👤 Mes chiffres":
+            afficher_vendeur(st.container(), vendeur_forced=user["nom"])
+        if active_page == "📆 Annuel":
+            afficher_annuel(st.container())
+        if active_page == "🏢 Mon agence":
+            afficher_agence(st.container(), agence_forced=user["agence"])
 
-        with tabs[3]:
+        if active_page == "👔 Commission agence":
             if df_directeurs.empty:
                 st.info("Aucune commission agence disponible.")
             else:
                 st.dataframe(format_df_directeurs(df_directeurs), use_container_width=True)
 
     elif role == "vendeur":
-        afficher_vendeur(tabs[0], vendeur_forced=user["nom"])
-        afficher_annuel(tabs[1])
+        if active_page == "👤 Mes chiffres":
+            afficher_vendeur(st.container(), vendeur_forced=user["nom"])
+        if active_page == "📆 Annuel":
+            afficher_annuel(st.container())
 
     # ====================== EXPORTS ADMIN ======================
 
     if role == "admin":
+        st.divider()
+
+        st.subheader("📊 Mise à jour EVP mensuelle")
+        target_sheet_evp = sheet_name_evp_for_next_month(periode)
+        st.caption(
+            f"Source : commandes OK uniquement. Période {periode} → onglet EVP {target_sheet_evp or 'à déterminer'}."
+        )
+        evp_file = st.file_uploader(
+            "Uploader EVP mensuelle.xlsx",
+            type=["xlsx"],
+            key=f"evp_upload_{safe_filename(periode)}"
+        )
+
+        if evp_file:
+            try:
+                evp_bytes, evp_error, evp_absents = update_evp_workbook(
+                    evp_file,
+                    df_vendeurs,
+                    df_directeurs,
+                    periode
+                )
+
+                if evp_error:
+                    st.error(f"❌ {evp_error}")
+                else:
+                    st.download_button(
+                        "📥 Télécharger EVP mis à jour",
+                        evp_bytes,
+                        f"EVP_mensuelle_mis_a_jour_{safe_filename(periode)}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"evp_download_{safe_filename(periode)}",
+                        on_click="ignore"
+                    )
+
+                    if evp_absents:
+                        st.warning(
+                            "Certains noms n'ont pas été trouvés dans l'EVP : "
+                            + ", ".join(evp_absents)
+                        )
+                    else:
+                        st.success("EVP préparé sans vendeur/directeur manquant.")
+            except Exception as exc:
+                st.error(f"❌ Impossible de préparer l'EVP : {exc}")
+
         st.divider()
 
         st.subheader("📦 Exports PDF groupés")
@@ -3024,7 +3395,24 @@ if st.session_state.get("df_vendeurs") is not None:
             st.info("Aucun PDF à générer pour cette période.")
 
 else:
-    st.info("👉 Charge une période sauvegardée depuis la barre latérale.")
+    st.info("👉 Charge une période sauvegardée.")
+    periodes_main = sorted(list_periodes(), key=periode_sort_key)
+
+    if periodes_main:
+        periode_empty_select = st.selectbox(
+            "Choisir une période sauvegardée",
+            [""] + periodes_main,
+            key="periode_empty_select"
+        )
+
+        if periode_empty_select:
+            if load_periode_preserve_ui(periode_empty_select):
+                st.rerun()
+            else:
+                st.error("❌ Impossible de charger cette période.")
+    else:
+        st.warning("Aucune période sauvegardée disponible.")
+
     if role == "admin":
         st.info("Ou charge les fichiers CONFIRM / BONLIVR puis clique sur « Lancer le traitement ».")
 
