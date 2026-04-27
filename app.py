@@ -773,9 +773,26 @@ def make_simple_pdf(title, metrics, df):
         commands = []
         add_text(margin, top_y - 8, title, size=14, bold=True)
         y = top_y - 28
-        metric_line = " | ".join([f"{k}: {v}" for k, v in metrics.items()])
-        add_text(margin, y, metric_line, size=8, bold=True)
-        y -= 22
+        metric_parts = [f"{k}: {v}" for k, v in metrics.items()]
+        metric_lines = []
+        current_line = ""
+
+        for part in metric_parts:
+            candidate = part if not current_line else f"{current_line} | {part}"
+            if len(candidate) > 120 and current_line:
+                metric_lines.append(current_line)
+                current_line = part
+            else:
+                current_line = candidate
+
+        if current_line:
+            metric_lines.append(current_line)
+
+        for metric_line in metric_lines:
+            add_text(margin, y, metric_line, size=8, bold=True)
+            y -= 12
+
+        y -= 10
 
         x = margin
         for col, w in zip(cols, col_widths):
@@ -2101,6 +2118,10 @@ if st.session_state.get("df_vendeurs") is not None:
                     "CA attente": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
                     "CA Total": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
                     "Commission": f"{to_float(data.get('commission_eur', 0)):,.2f} EUR",
+                    "Remise commission hors OPC": f"{to_float(data.get('remise_hors_opc_pct', 0)):,.2f} %",
+                    "Base commission": f"{to_float(data.get('base_commission_pct', 0)):,.2f} %",
+                    "Points perdus": f"{to_float(data.get('points_perdus', 0)):,.0f}",
+                    "Commission definitive": f"{to_float(data.get('commission_pct', 0)):,.2f} %",
                     vendeur_remise_label: f"{to_float(data.get(vendeur_remise_col, 0)):,.2f} %",
                     vendeur_bonus_malus_label: f"{to_float(data.get(vendeur_bonus_malus_col, 0)):,.2f} EUR",
                 }
