@@ -7,6 +7,10 @@ from pathlib import Path
 import pickle
 import json
 import html
+import hashlib
+import hmac
+import secrets
+import time
 import base64
 import re
 import os
@@ -19,7 +23,11 @@ from openpyxl import load_workbook
 
 # ====================== CONFIG ======================
 
-st.set_page_config(page_title="Espace Commissions ECOHABITAT", layout="wide")
+st.set_page_config(
+    page_title="Espace Commissions ECOHABITAT",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
 # ====================== CSS DESIGN ======================
 
@@ -191,9 +199,69 @@ HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
 ATTENTE_MOTIFS_FILE = DATA_DIR / "motifs_attente.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_LOCK_SECONDS = 5 * 60
 
 
 # ====================== USERS ======================
+
+def hash_password(password):
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt.encode("utf-8"),
+        180000
+    ).hex()
+    return f"pbkdf2_sha256$180000${salt}${digest}"
+
+
+def verify_password(password, stored_value):
+    stored_value = str(stored_value or "")
+    if stored_value.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, expected = stored_value.split("$", 3)
+            digest = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(password).encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations)
+            ).hex()
+            return hmac.compare_digest(digest, expected)
+        except Exception:
+            return False
+
+    return hmac.compare_digest(stored_value, str(password))
+
+
+def password_is_hashed(user):
+    return str(user.get("password_hash", "")).startswith("pbkdf2_sha256$")
+
+
+def password_is_strong_enough(password):
+    password = str(password or "")
+    return (
+        len(password) >= 8
+        and any(c.isalpha() for c in password)
+        and any(c.isdigit() for c in password)
+    )
+
+
+def get_login_lock_remaining():
+    locked_until = st.session_state.get("login_locked_until", 0)
+    return max(0, int(locked_until - time.time()))
+
+
+def register_failed_login():
+    st.session_state.login_attempts = st.session_state.get("login_attempts", 0) + 1
+    if st.session_state.login_attempts >= MAX_LOGIN_ATTEMPTS:
+        st.session_state.login_locked_until = time.time() + LOGIN_LOCK_SECONDS
+
+
+def reset_login_security_state():
+    st.session_state.login_attempts = 0
+    st.session_state.login_locked_until = 0
+
 
 def load_users():
     if USERS_FILE.exists():
@@ -202,7 +270,7 @@ def load_users():
 
     default_users = {
         "joseph": {
-            "password": "admin123",
+            "password_hash": hash_password("admin123"),
             "role": "admin",
             "nom": "LUCCHINI JOSEPH",
             "agence": None
@@ -1859,16 +1927,35 @@ if not st.session_state.logged_in:
     password = st.text_input("Mot de passe", type="password")
 
     if st.button("Se connecter", type="primary"):
-        users = load_users()
-        user = users.get(username.lower())
+        remaining_lock = get_login_lock_remaining()
 
-        if user and user.get("password") == password:
-            st.session_state.logged_in = True
-            st.session_state.user = user
-            st.session_state.username = username.lower()
-            st.rerun()
+        if remaining_lock > 0:
+            st.error(f"Trop d'essais incorrects. Réessaie dans {remaining_lock // 60 + 1} min.")
         else:
-            st.error("Identifiant ou mot de passe incorrect.")
+            users = load_users()
+            username_key = username.lower().strip()
+            user = users.get(username_key)
+            stored_password = user.get("password_hash") or user.get("password") if user else ""
+
+            if user and verify_password(password, stored_password):
+                if not password_is_hashed(user):
+                    user["password_hash"] = hash_password(password)
+                    user.pop("password", None)
+                    users[username_key] = user
+                    save_users(users)
+
+                reset_login_security_state()
+                st.session_state.logged_in = True
+                st.session_state.user = user
+                st.session_state.username = username_key
+                st.rerun()
+            else:
+                register_failed_login()
+                remaining_attempts = MAX_LOGIN_ATTEMPTS - st.session_state.get("login_attempts", 0)
+                if remaining_attempts > 0:
+                    st.error(f"Identifiant ou mot de passe incorrect. Essais restants : {remaining_attempts}.")
+                else:
+                    st.error("Trop d'essais incorrects. Connexion bloquée temporairement.")
 
     st.stop()
 
@@ -2337,6 +2424,11 @@ def afficher_admin_users():
 
     if users:
         df_users = pd.DataFrame.from_dict(users, orient="index")
+        df_users["Mot de passe sécurisé"] = df_users.apply(
+            lambda row: "Oui" if str(row.get("password_hash", "")).startswith("pbkdf2_sha256$") else "À migrer",
+            axis=1
+        )
+        df_users = df_users.drop(columns=["password", "password_hash"], errors="ignore")
         df_users.index.name = "Identifiant"
         st.dataframe(df_users, use_container_width=True)
     else:
@@ -2360,11 +2452,13 @@ def afficher_admin_users():
     if st.button("Créer utilisateur", type="primary"):
         if not new_user or not new_password or not new_nom:
             st.error("Identifiant, mot de passe et nom sont obligatoires.")
+        elif not password_is_strong_enough(new_password):
+            st.error("Le mot de passe doit contenir au moins 8 caractères avec au moins une lettre et un chiffre.")
         elif new_user in users:
             st.error("Cet utilisateur existe déjà.")
         else:
             users[new_user] = {
-                "password": new_password,
+                "password_hash": hash_password(new_password),
                 "role": new_role,
                 "nom": new_nom,
                 "agence": new_agence if new_role == "directeur_agence" else None
@@ -2383,7 +2477,13 @@ def afficher_admin_users():
         if user_edit:
             u = users[user_edit]
 
-            edit_password = st.text_input("Mot de passe", value=u.get("password", ""), type="password", key="edit_password")
+            edit_password = st.text_input(
+                "Nouveau mot de passe",
+                value="",
+                type="password",
+                key="edit_password",
+                help="Laisse vide pour conserver le mot de passe actuel."
+            )
 
             role_options = ["admin", "vendeur", "directeur_agence"]
             current_role = u.get("role", "vendeur")
@@ -2394,12 +2494,24 @@ def afficher_admin_users():
             edit_agence = st.text_input("Agence", value=u.get("agence") or "", key="edit_agence").upper().strip()
 
             if st.button("Enregistrer modification"):
-                users[user_edit] = {
-                    "password": edit_password,
+                updated_user = {
                     "role": edit_role,
                     "nom": edit_nom,
                     "agence": edit_agence if edit_role == "directeur_agence" else None
                 }
+
+                if edit_password:
+                    if not password_is_strong_enough(edit_password):
+                        st.error("Le mot de passe doit contenir au moins 8 caractères avec au moins une lettre et un chiffre.")
+                        st.stop()
+                    updated_user["password_hash"] = hash_password(edit_password)
+                else:
+                    if u.get("password_hash"):
+                        updated_user["password_hash"] = u.get("password_hash")
+                    elif u.get("password"):
+                        updated_user["password_hash"] = hash_password(u.get("password"))
+
+                users[user_edit] = updated_user
                 save_users(users)
 
                 if user_edit == st.session_state.get("username"):
@@ -3485,6 +3597,37 @@ if st.session_state.get("df_vendeurs") is not None:
 
             if not detail.empty:
                 afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode)
+                motifs_attente = load_motifs_attente()
+
+                detail["_ATTENTE_KEY_"] = detail.apply(
+                    lambda row: make_attente_tracking_key(row, col_client, col_doc, col_agence, col_ca_magasin, col_catalogue),
+                    axis=1
+                )
+                detail["Motif d'attente"] = detail.apply(
+                    lambda row: clean_visible(motifs_attente.get(row.get("_ATTENTE_KEY_", ""), {}).get("motif", ""))
+                    if str(row.get("Statut", "")).startswith("⏳") else "",
+                    axis=1
+                )
+                detail["Détail motif"] = detail.apply(
+                    lambda row: clean_visible(motifs_attente.get(row.get("_ATTENTE_KEY_", ""), {}).get("detail", ""))
+                    if str(row.get("Statut", "")).startswith("⏳") else "",
+                    axis=1
+                )
+                detail["_BULLE_ATTENTE_"] = detail.apply(
+                    lambda row: " | ".join([
+                        part for part in [
+                            clean_visible(row.get("Motif d'attente", "")),
+                            clean_visible(row.get("Détail motif", ""))
+                        ]
+                        if part
+                    ]),
+                    axis=1
+                )
+                detail["Statut"] = detail.apply(
+                    lambda row: "⏳ En attente ⓘ"
+                    if clean_visible(row.get("Motif d'attente", "")) else row.get("Statut", ""),
+                    axis=1
+                )
 
                 colonnes_commerciaux = [
                     st.session_state.col_com1,
@@ -3565,7 +3708,11 @@ if st.session_state.get("df_vendeurs") is not None:
                         pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
                         st.success(f"PDF généré : {pdf_path}")
 
-                st.dataframe(detail_affichage, use_container_width=True, height=600)
+                render_table_with_status_tooltips(
+                    detail_affichage,
+                    tooltip_by_index=detail["_BULLE_ATTENTE_"].to_dict(),
+                    height=600
+                )
             else:
                 st.info("Aucune affaire trouvée pour cette agence.")
 
@@ -3841,6 +3988,28 @@ else:
     periodes_main = sorted(list_periodes(), key=periode_sort_key)
 
     if periodes_main:
+        st.markdown("""
+        <style>
+        @keyframes periodChoicePulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(54, 135, 23, 0.55);
+                border-color: #D1D5DB;
+            }
+            50% {
+                box-shadow: 0 0 0 6px rgba(54, 135, 23, 0.18);
+                border-color: #368717;
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(54, 135, 23, 0);
+                border-color: #D1D5DB;
+            }
+        }
+        div[data-testid="stSelectbox"] [data-baseweb="select"] {
+            animation: periodChoicePulse 2.2s ease-in-out infinite;
+            border-radius: 9px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
         periode_empty_select = st.selectbox(
             "Choisir une période sauvegardée",
             [""] + periodes_main,
