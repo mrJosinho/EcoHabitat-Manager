@@ -2852,42 +2852,6 @@ def afficher_dossiers_en_attente(tab):
                 mailto_url = f"mailto:?subject={quote(mail_subject)}&body={quote(mail_body)}"
                 st.link_button("📧 Préparer un mail de relance", mailto_url)
 
-            with st.expander("📧 Mail interne hebdomadaire", expanded=False):
-                settings = load_settings()
-                internal_recipients = st.text_input(
-                    "Destinataires internes",
-                    value=clean_visible(settings.get("attente_internal_recipients", "")),
-                    placeholder="secretariat@...; associe@...",
-                    key="attente_internal_recipients"
-                )
-
-                if st.button("💾 Enregistrer les destinataires", key="save_attente_internal_recipients"):
-                    settings["attente_internal_recipients"] = clean_visible(internal_recipients)
-                    save_settings(settings)
-                    st.success("Destinataires enregistrés ✅")
-
-                internal_subject = f"Suivi hebdomadaire dossiers en attente - {periode}"
-                internal_body = build_attente_internal_mail_body(
-                    filtered,
-                    periode,
-                    col_client,
-                    col_doc,
-                    col_date,
-                    col_agence,
-                    col_ca_magasin
-                )
-                recipients_url = quote(clean_visible(internal_recipients), safe="@.;,")
-                internal_mailto = f"mailto:{recipients_url}?subject={quote(internal_subject)}&body={quote(internal_body)}"
-
-                st.link_button("📨 Préparer le mail interne", internal_mailto)
-                st.download_button(
-                    "📄 Télécharger le récap en TXT",
-                    internal_body.encode("utf-8"),
-                    f"suivi_attente_{safe_filename(periode)}.txt",
-                    "text/plain",
-                    key="download_attente_internal_summary"
-                )
-
         cols_show = [
             col_client,
             "Commerciaux",
@@ -2929,6 +2893,43 @@ def afficher_dossiers_en_attente(tab):
             ).dt.strftime("%d/%m/%Y").fillna("")
 
         st.dataframe(affichage.reset_index(drop=True), use_container_width=True, height=650)
+
+        if not filtered.empty:
+            with st.expander("📧 Mail interne hebdomadaire", expanded=False):
+                settings = load_settings()
+                internal_recipients = st.text_input(
+                    "Destinataires internes",
+                    value=clean_visible(settings.get("attente_internal_recipients", "")),
+                    placeholder="secretariat@...; associe@...",
+                    key="attente_internal_recipients"
+                )
+
+                if st.button("💾 Enregistrer les destinataires", key="save_attente_internal_recipients"):
+                    settings["attente_internal_recipients"] = clean_visible(internal_recipients)
+                    save_settings(settings)
+                    st.success("Destinataires enregistrés ✅")
+
+                internal_subject = f"Suivi hebdomadaire dossiers en attente - {periode}"
+                internal_body = build_attente_internal_mail_body(
+                    filtered,
+                    periode,
+                    col_client,
+                    col_doc,
+                    col_date,
+                    col_agence,
+                    col_ca_magasin
+                )
+                recipients_url = quote(clean_visible(internal_recipients), safe="@.;,")
+                internal_mailto = f"mailto:{recipients_url}?subject={quote(internal_subject)}&body={quote(internal_body)}"
+
+                st.link_button("📨 Préparer le mail interne", internal_mailto)
+                st.download_button(
+                    "📄 Télécharger le récap en TXT",
+                    internal_body.encode("utf-8"),
+                    f"suivi_attente_{safe_filename(periode)}.txt",
+                    "text/plain",
+                    key="download_attente_internal_summary"
+                )
 
 
 # ====================== AFFICHAGE DONNÉES ======================
