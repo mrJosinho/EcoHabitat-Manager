@@ -8,6 +8,8 @@ import json
 import base64
 import re
 import os
+import io
+import zipfile
 from datetime import datetime
 
 # ====================== CONFIG ======================
@@ -494,7 +496,20 @@ def ensure_remise_columns(df):
     return df
 
 
-def recompute_df_vendeurs_indicators(df_vendeurs, df_ok, df_c, col_vente, col_catalogue, col_rem, col_op, colonnes_commerciaux, key_cols):
+def recompute_df_vendeurs_indicators(
+    df_vendeurs,
+    df_ok,
+    df_c,
+    col_vente,
+    col_catalogue,
+    col_rem,
+    col_op,
+    colonnes_commerciaux,
+    key_cols,
+    col_client=None,
+    col_agence=None,
+    col_ca_magasin=None
+):
     if df_vendeurs.empty:
         return df_vendeurs
 
@@ -516,6 +531,24 @@ def recompute_df_vendeurs_indicators(df_vendeurs, df_ok, df_c, col_vente, col_ca
         values = bonus_malus.get(k, {})
         df_vendeurs.at[idx, "bonus_malus_ok"] = round(values.get("bonus_malus_ok", 0.0), 2)
         df_vendeurs.at[idx, "bonus_malus_global"] = round(values.get("bonus_malus_global", 0.0), 2)
+
+        ok_detail = df_ok[vendeur_mask(df_ok, row.get("Commercial"), colonnes_commerciaux)].copy()
+        attente_detail = df_c[vendeur_mask(df_c, row.get("Commercial"), colonnes_commerciaux)].copy()
+        attente_detail = remove_attente_already_ok(
+            ok_detail,
+            attente_detail,
+            key_cols,
+            col_client,
+            col_agence,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue
+        )
+        ca_ok = sum_numeric_col(ok_detail, col_vente)
+        ca_attente = sum_numeric_col(attente_detail, col_vente)
+        df_vendeurs.at[idx, "ca_ok"] = round(ca_ok, 2)
+        df_vendeurs.at[idx, "ca_attente"] = round(ca_attente, 2)
+        df_vendeurs.at[idx, "ca_total"] = round(ca_ok + ca_attente, 2)
 
         remise_values = remises.get(k, {})
         ok_catalogue_total = remise_values.get("ok_catalogue_total", 0.0)
@@ -613,6 +646,46 @@ def remove_attente_already_ok(ok_detail, attente_detail, key_cols, col_client, c
         attente_detail = attente_detail.drop(columns=["_AFFAIRE_KEY_"], errors="ignore")
 
     return attente_detail
+
+
+def sum_numeric_col(df, col):
+    if df.empty or not col or col not in df.columns:
+        return 0.0
+    return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+
+
+def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
+    if df_agences.empty or not col_agence:
+        return df_agences
+
+    df_agences = df_agences.copy()
+
+    for idx, row in df_agences.iterrows():
+        agence = row.get("agence")
+        ok_detail = df_ok[agence_mask(df_ok, agence, col_agence)].copy()
+        attente_detail = df_c[agence_mask(df_c, agence, col_agence)].copy()
+        attente_detail = remove_attente_already_ok(
+            ok_detail,
+            attente_detail,
+            key_cols,
+            col_client,
+            col_agence,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue
+        )
+
+        ca_ok = sum_numeric_col(ok_detail, col_ca_magasin)
+        ca_attente = sum_numeric_col(attente_detail, col_ca_magasin)
+
+        df_agences.at[idx, "ca_ok"] = round(ca_ok, 2)
+        df_agences.at[idx, "ca_attente"] = round(ca_attente, 2)
+        df_agences.at[idx, "ca_total"] = round(ca_ok + ca_attente, 2)
+        df_agences.at[idx, "ca_magasin_ok"] = round(ca_ok, 2)
+        df_agences.at[idx, "nb_ok"] = len(ok_detail)
+        df_agences.at[idx, "nb_total"] = len(ok_detail) + len(attente_detail)
+
+    return df_agences
 
 
 def get_periode_start(periode):
@@ -864,6 +937,215 @@ def save_pdf_export(pdf_bytes, filename):
 
 def is_render_env():
     return bool(os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_ID"))
+
+
+def build_detail_vendeur_pdf(vendeur, data, df_ok, df_c, colonnes_commerciaux, key_cols, cols, periode):
+    col_client = cols["client"]
+    col_doc = cols["doc"]
+    col_date = cols["date"]
+    col_agence = cols["agence"]
+    col_vente = cols["vente"]
+    col_ca_magasin = cols["ca_magasin"]
+    col_catalogue = cols["catalogue"]
+    col_rem = cols["rem"]
+    col_op = cols["op"]
+
+    ok_detail = df_ok[vendeur_mask(df_ok, vendeur, colonnes_commerciaux)].copy()
+    attente_detail = df_c[vendeur_mask(df_c, vendeur, colonnes_commerciaux)].copy()
+
+    attente_detail = remove_attente_already_ok(
+        ok_detail,
+        attente_detail,
+        key_cols,
+        col_client,
+        col_agence,
+        col_vente,
+        col_ca_magasin,
+        col_catalogue
+    )
+
+    ok_detail["Statut"] = "OK"
+    attente_detail["Statut"] = "En attente"
+    detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
+
+    if detail.empty:
+        return None, None
+
+    detail_calc = detail.copy()
+    for c in [col_vente, col_ca_magasin, col_catalogue, col_rem]:
+        if c and c in detail_calc.columns:
+            detail_calc[c] = pd.to_numeric(detail_calc[c], errors="coerce").fillna(0)
+
+    detail_calc["Commerciaux"] = detail_calc.apply(
+        lambda row: list_commerciaux_row(row, colonnes_commerciaux),
+        axis=1
+    )
+    detail_calc["Nombre de vendeurs"] = detail_calc.apply(
+        lambda row: count_vendeurs_row(row, colonnes_commerciaux),
+        axis=1
+    )
+
+    if col_catalogue and col_catalogue in detail_calc.columns and col_rem and col_rem in detail_calc.columns:
+        detail_calc["Remise %"] = np.where(
+            detail_calc[col_catalogue] > 0,
+            detail_calc[col_rem] / detail_calc[col_catalogue] * 100,
+            0
+        )
+    else:
+        detail_calc["Remise %"] = 0
+
+    if col_catalogue and col_catalogue in detail_calc.columns and col_vente and col_vente in detail_calc.columns:
+        objectif_15_par_vendeur = (detail_calc[col_catalogue] * 0.85) / detail_calc["Nombre de vendeurs"]
+        detail_calc["Bonus / Malus"] = detail_calc[col_vente] - objectif_15_par_vendeur
+    else:
+        detail_calc["Bonus / Malus"] = 0
+
+    if col_op and col_op in detail_calc.columns:
+        opc_mask = detail_calc.apply(lambda row: is_opc(row, col_op), axis=1)
+        detail_calc.loc[opc_mask & (detail_calc["Bonus / Malus"] < 0), "Bonus / Malus"] = 0
+        detail_calc["OPC"] = np.where(opc_mask, "OUI", "")
+    else:
+        detail_calc["OPC"] = ""
+
+    cols_show = [
+        col_client,
+        "Commerciaux",
+        col_doc,
+        col_date,
+        "Statut",
+        col_agence,
+        col_vente,
+        col_ca_magasin,
+        "Remise %",
+        "OPC",
+        "Bonus / Malus"
+    ]
+    cols_show = list(dict.fromkeys([c for c in cols_show if c and c in detail_calc.columns]))
+    detail_affichage = detail_calc[cols_show].copy()
+
+    rename_cols = {}
+    if col_client:
+        rename_cols[col_client] = "Client / Référence affaire"
+    if col_doc:
+        rename_cols[col_doc] = "N° Document"
+    if col_date:
+        rename_cols[col_date] = "Date document"
+    if col_agence:
+        rename_cols[col_agence] = "Agence"
+    if col_vente:
+        rename_cols[col_vente] = "TOTAL VENTE"
+    if col_ca_magasin:
+        rename_cols[col_ca_magasin] = "Vente HT hors acompte"
+    detail_affichage = detail_affichage.rename(columns=rename_cols)
+
+    for c in ["TOTAL VENTE", "Vente HT hors acompte", "Remise %", "Bonus / Malus"]:
+        if c in detail_affichage.columns:
+            detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
+
+    if "Date document" in detail_affichage.columns:
+        detail_affichage["Date document"] = pd.to_datetime(
+            detail_affichage["Date document"],
+            errors="coerce"
+        ).dt.strftime("%d/%m/%Y").fillna("")
+
+    metrics = {
+        "CA OK": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
+        "CA attente": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
+        "CA Total": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
+        "Commission": f"{to_float(data.get('commission_eur', 0)):,.2f} EUR",
+        "Remise commission hors OPC": f"{to_float(data.get('remise_hors_opc_pct', 0)):,.2f} %",
+        "Base commission": f"{to_float(data.get('base_commission_pct', 0)):,.2f} %",
+        "Points perdus": f"{to_float(data.get('points_perdus', 0)):,.0f}",
+        "Commission definitive": f"{to_float(data.get('commission_pct', 0)):,.2f} %",
+        "Remise OK hors OPC": f"{to_float(data.get('remise_ok_pct', 0)):,.2f} %",
+        "Bonus / Malus OK": f"{to_float(data.get('bonus_malus_ok', 0)):,.2f} EUR",
+    }
+
+    return detail_affichage, metrics
+
+
+def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
+    col_client = cols["client"]
+    col_doc = cols["doc"]
+    col_date = cols["date"]
+    col_agence = cols["agence"]
+    col_vente = cols["vente"]
+    col_ca_magasin = cols["ca_magasin"]
+    col_catalogue = cols["catalogue"]
+    col_rem = cols["rem"]
+    col_op = cols["op"]
+    colonnes_commerciaux = cols["commerciaux"]
+
+    ok_detail = df_ok[agence_mask(df_ok, agence, col_agence)].copy()
+    attente_detail = df_c[agence_mask(df_c, agence, col_agence)].copy()
+
+    attente_detail = remove_attente_already_ok(
+        ok_detail,
+        attente_detail,
+        key_cols,
+        col_client,
+        col_agence,
+        col_vente,
+        col_ca_magasin,
+        col_catalogue
+    )
+
+    ok_detail["Statut"] = "OK"
+    attente_detail["Statut"] = "En attente"
+    detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
+
+    if detail.empty:
+        return None, None
+
+    detail["Commerciaux"] = detail.apply(
+        lambda row: list_commerciaux_row(row, colonnes_commerciaux),
+        axis=1
+    )
+
+    cols_show = [
+        col_client,
+        "Commerciaux",
+        col_doc,
+        col_date,
+        "Statut",
+        col_agence,
+        col_ca_magasin,
+        col_vente,
+        col_catalogue,
+        col_rem,
+        col_op
+    ]
+    cols_show = list(dict.fromkeys([c for c in cols_show if c and c in detail.columns]))
+    detail_affichage = detail[cols_show].copy()
+
+    for c in [col_ca_magasin, col_vente, col_catalogue, col_rem]:
+        if c and c in detail_affichage.columns:
+            detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
+
+    if col_date and col_date in detail_affichage.columns:
+        detail_affichage[col_date] = pd.to_datetime(
+            detail_affichage[col_date],
+            errors="coerce"
+        ).dt.strftime("%d/%m/%Y").fillna("")
+
+    metrics = {
+        "CA OK agence": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
+        "CA attente agence": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
+        "CA Total agence": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
+        "CA magasin OK": f"{to_float(data.get('ca_magasin_ok', 0)):,.2f} EUR",
+        "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
+    }
+
+    return detail_affichage, metrics
+
+
+def make_pdf_zip(items):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename, pdf_bytes in items:
+            zf.writestr(filename, pdf_bytes)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def save_periode(periode, data):
@@ -1387,7 +1669,10 @@ if role == "admin":
             col_rem,
             col_op,
             colonnes_commerciaux,
-            key_cols
+            key_cols,
+            col_client,
+            col_agence,
+            col_ca_magasin
         )
 
         # ====================== AGENCES ======================
@@ -1471,6 +1756,17 @@ if role == "admin":
             })
 
         df_agences = pd.DataFrame(agence_results)
+        df_agences = recompute_df_agences_attente(
+            df_agences,
+            df_ok,
+            df_confirm,
+            key_cols,
+            col_client,
+            col_agence,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue
+        )
 
         # ====================== DIRECTEURS ======================
 
@@ -1827,6 +2123,161 @@ def afficher_annuel(tab):
                 st.info("Aucune donnée agence pour cette analyse annuelle.")
 
 
+def afficher_dossiers_en_attente(tab):
+    with tab:
+        st.subheader("⏳ Dossiers en attente")
+
+        df_ok = st.session_state.df_ok.copy()
+        df_c = st.session_state.df_c.copy()
+
+        col_client = st.session_state.col_client
+        col_doc = st.session_state.col_doc
+        col_date = st.session_state.col_date
+        col_op = st.session_state.col_op
+        col_agence = st.session_state.col_agence
+        col_vente = st.session_state.col_vente
+        col_ca_magasin = st.session_state.col_ca_magasin
+        col_catalogue = st.session_state.col_catalogue
+        col_rem = st.session_state.col_rem
+        colonnes_commerciaux = [
+            st.session_state.col_com1,
+            st.session_state.col_com2,
+            st.session_state.col_com3
+        ]
+
+        attente = remove_attente_already_ok(
+            df_ok,
+            df_c,
+            st.session_state.key_cols,
+            col_client,
+            col_agence,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue
+        )
+
+        if attente.empty:
+            st.success("Aucun dossier en attente.")
+            return
+
+        attente = attente.copy()
+        attente["Commerciaux"] = attente.apply(
+            lambda row: list_commerciaux_row(row, colonnes_commerciaux),
+            axis=1
+        )
+
+        if col_op and col_op in attente.columns:
+            attente["OPC"] = np.where(attente.apply(lambda row: is_opc(row, col_op), axis=1), "OUI", "")
+        else:
+            attente["OPC"] = ""
+
+        if col_catalogue and col_catalogue in attente.columns and col_rem and col_rem in attente.columns:
+            catalogue = pd.to_numeric(attente[col_catalogue], errors="coerce").fillna(0)
+            remise = pd.to_numeric(attente[col_rem], errors="coerce").fillna(0)
+            attente["Remise %"] = np.where(catalogue > 0, remise / catalogue * 100, 0)
+        else:
+            attente["Remise %"] = 0
+
+        vendeurs = sorted({
+            nom
+            for value in attente["Commerciaux"].dropna()
+            for nom in [n.strip() for n in str(value).split("/")]
+            if nom
+        })
+        agences = sorted(attente[col_agence].dropna().map(clean_visible).unique()) if col_agence in attente.columns else []
+
+        f1, f2, f3, f4 = st.columns([2, 2, 1, 2])
+
+        vendeur_filtre = f1.selectbox("Commercial", ["Tous"] + vendeurs, key="attente_filtre_vendeur")
+        agence_filtre = f2.selectbox("Agence", ["Toutes"] + agences, key="attente_filtre_agence")
+        opc_filtre = f3.selectbox("OPC", ["Tous", "Oui", "Non"], key="attente_filtre_opc")
+        recherche = f4.text_input("Recherche client / document", key="attente_recherche").strip()
+
+        filtered = attente.copy()
+
+        if vendeur_filtre != "Tous":
+            filtered = filtered[
+                filtered["Commerciaux"].apply(lambda value: normalize_key(vendeur_filtre) in [normalize_key(n) for n in str(value).split("/")])
+            ]
+
+        if agence_filtre != "Toutes" and col_agence in filtered.columns:
+            filtered = filtered[filtered[col_agence].apply(normalize_key) == normalize_key(agence_filtre)]
+
+        if opc_filtre == "Oui":
+            filtered = filtered[filtered["OPC"] == "OUI"]
+        elif opc_filtre == "Non":
+            filtered = filtered[filtered["OPC"] != "OUI"]
+
+        if recherche:
+            search_cols = [c for c in [col_client, col_doc, "Commerciaux", col_agence] if c and c in filtered.columns]
+            search_key = normalize_key(recherche)
+            mask = pd.Series(False, index=filtered.index)
+            for c in search_cols:
+                mask |= filtered[c].apply(lambda value: search_key in normalize_key(value))
+            filtered = filtered[mask]
+
+        sort_cols = [c for c in [col_agence, "Commerciaux", col_client] if c and c in filtered.columns]
+        if sort_cols:
+            filtered = (
+                filtered
+                .assign(**{f"_sort_{c}": filtered[c].apply(normalize_key) for c in sort_cols})
+                .sort_values([f"_sort_{c}" for c in sort_cols])
+                .drop(columns=[f"_sort_{c}" for c in sort_cols])
+            )
+
+        total_ca_global = (
+            pd.to_numeric(filtered[col_ca_magasin], errors="coerce").fillna(0).sum()
+            if col_ca_magasin in filtered.columns
+            else 0
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            card("⏳ Nb dossiers", f"{len(filtered)}")
+        with c2:
+            card("🏢 CA global en attente", f"{total_ca_global:,.2f} €")
+
+        cols_show = [
+            col_client,
+            "Commerciaux",
+            col_doc,
+            col_date,
+            col_agence,
+            col_ca_magasin,
+            "Remise %",
+            "OPC"
+        ]
+        cols_show = list(dict.fromkeys([c for c in cols_show if c and c in filtered.columns]))
+        affichage = filtered[cols_show].copy()
+
+        rename_cols = {}
+        if col_client:
+            rename_cols[col_client] = "Client / Référence affaire"
+        if col_doc:
+            rename_cols[col_doc] = "N° Document"
+        if col_date:
+            rename_cols[col_date] = "Date document"
+        if col_agence:
+            rename_cols[col_agence] = "Agence"
+        if col_vente:
+            rename_cols[col_vente] = "TOTAL VENTE"
+        if col_ca_magasin:
+            rename_cols[col_ca_magasin] = "CA global affaire"
+        affichage = affichage.rename(columns=rename_cols)
+
+        for c in ["TOTAL VENTE", "CA global affaire", "Remise %"]:
+            if c in affichage.columns:
+                affichage[c] = pd.to_numeric(affichage[c], errors="coerce").fillna(0).round(2)
+
+        if "Date document" in affichage.columns:
+            affichage["Date document"] = pd.to_datetime(
+                affichage["Date document"],
+                errors="coerce"
+            ).dt.strftime("%d/%m/%Y").fillna("")
+
+        st.dataframe(affichage.reset_index(drop=True), use_container_width=True, height=650)
+
+
 # ====================== AFFICHAGE DONNÉES ======================
 
 if st.session_state.get("df_vendeurs") is not None:
@@ -1862,10 +2313,25 @@ if st.session_state.get("df_vendeurs") is not None:
             st.session_state.col_com2,
             st.session_state.col_com3
         ],
-        st.session_state.key_cols
+        st.session_state.key_cols,
+        st.session_state.col_client,
+        st.session_state.col_agence,
+        st.session_state.col_ca_magasin
     )
     st.session_state.df_vendeurs = df_vendeurs_all.copy()
     df_agences_all = st.session_state.get("df_agences", pd.DataFrame()).copy()
+    df_agences_all = recompute_df_agences_attente(
+        df_agences_all,
+        st.session_state.df_ok.copy(),
+        st.session_state.df_c.copy(),
+        st.session_state.key_cols,
+        st.session_state.col_client,
+        st.session_state.col_agence,
+        st.session_state.col_vente,
+        st.session_state.col_ca_magasin,
+        st.session_state.col_catalogue
+    )
+    st.session_state.df_agences = df_agences_all.copy()
     df_directeurs_all = st.session_state.get("df_directeurs", pd.DataFrame()).copy()
     periode = st.session_state.get("periode", "Mois inconnu")
 
@@ -1902,6 +2368,7 @@ if st.session_state.get("df_vendeurs") is not None:
     if role == "admin":
         tabs = st.tabs([
             "📊 Dashboard",
+            "⏳ En attente",
             "📆 Annuel",
             "👤 Par Vendeur",
             "🏢 Par Agence",
@@ -2418,11 +2885,12 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        afficher_annuel(tabs[1])
-        afficher_vendeur(tabs[2])
-        afficher_agence(tabs[3])
+        afficher_dossiers_en_attente(tabs[1])
+        afficher_annuel(tabs[2])
+        afficher_vendeur(tabs[3])
+        afficher_agence(tabs[4])
 
-        with tabs[4]:
+        with tabs[5]:
             if df_directeurs.empty:
                 st.info("Aucune commission magasin calculée.")
             else:
@@ -2431,7 +2899,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     use_container_width=True
                 )
 
-        with tabs[5]:
+        with tabs[6]:
             st.subheader("👤 Vendeurs")
             st.dataframe(format_df_vendeurs(df_vendeurs).sort_values("CA OK", ascending=False), use_container_width=True)
 
@@ -2443,7 +2911,7 @@ if st.session_state.get("df_vendeurs") is not None:
             if not df_directeurs.empty:
                 st.dataframe(format_df_directeurs(df_directeurs).sort_values("Commission magasin €", ascending=False), use_container_width=True)
 
-        with tabs[6]:
+        with tabs[7]:
             afficher_admin_users()
 
     elif role == "directeur_agence":
@@ -2466,18 +2934,92 @@ if st.session_state.get("df_vendeurs") is not None:
     if role == "admin":
         st.divider()
 
-        col_export1, col_export2, col_export3 = st.columns(3)
+        st.subheader("📦 Exports PDF groupés")
 
-        csv_vendeurs = format_df_vendeurs(df_vendeurs).to_csv(index=False, sep=";").encode("utf-8-sig")
-        col_export1.download_button("📥 Export vendeurs", csv_vendeurs, f"commissions_vendeurs_{periode}.csv", "text/csv")
+        pdf_cols = {
+            "client": st.session_state.col_client,
+            "doc": st.session_state.col_doc,
+            "date": st.session_state.col_date,
+            "op": st.session_state.col_op,
+            "ca_magasin": st.session_state.col_ca_magasin,
+            "vente": st.session_state.col_vente,
+            "rem": st.session_state.col_rem,
+            "catalogue": st.session_state.col_catalogue,
+            "agence": st.session_state.col_agence,
+            "commerciaux": [
+                st.session_state.col_com1,
+                st.session_state.col_com2,
+                st.session_state.col_com3
+            ],
+        }
 
-        if not df_agences.empty:
-            csv_agences = format_df_agences(df_agences).to_csv(index=False, sep=";").encode("utf-8-sig")
-            col_export2.download_button("📥 Export agences", csv_agences, f"agences_{periode}.csv", "text/csv")
+        bulk_pdf_items = []
 
-        if not df_directeurs.empty:
-            csv_directeurs = format_df_directeurs(df_directeurs).to_csv(index=False, sep=";").encode("utf-8-sig")
-            col_export3.download_button("📥 Export directeurs", csv_directeurs, f"commissions_directeurs_{periode}.csv", "text/csv")
+        with st.spinner("Préparation des PDF vendeurs et agences..."):
+            for _, vendeur_row in df_vendeurs.sort_values("Commercial").iterrows():
+                vendeur_nom = vendeur_row.get("Commercial", "")
+                detail_pdf, metrics_pdf = build_detail_vendeur_pdf(
+                    vendeur_nom,
+                    vendeur_row,
+                    st.session_state.df_ok.copy(),
+                    st.session_state.df_c.copy(),
+                    pdf_cols["commerciaux"],
+                    st.session_state.key_cols,
+                    pdf_cols,
+                    periode
+                )
+
+                if detail_pdf is None:
+                    continue
+
+                pdf_bytes = make_simple_pdf(
+                    f"Detail des affaires - {vendeur_nom} - {periode}",
+                    metrics_pdf,
+                    detail_pdf.reset_index(drop=True)
+                )
+                bulk_pdf_items.append((
+                    f"vendeurs/{safe_filename(vendeur_nom)}_{safe_filename(periode)}.pdf",
+                    pdf_bytes
+                ))
+
+            if not df_agences.empty:
+                for _, agence_row in df_agences.sort_values("agence").iterrows():
+                    agence_nom = agence_row.get("agence", "")
+                    detail_pdf, metrics_pdf = build_detail_agence_pdf(
+                        agence_nom,
+                        agence_row,
+                        st.session_state.df_ok.copy(),
+                        st.session_state.df_c.copy(),
+                        st.session_state.key_cols,
+                        pdf_cols,
+                        periode
+                    )
+
+                    if detail_pdf is None:
+                        continue
+
+                    pdf_bytes = make_simple_pdf(
+                        f"Detail des affaires agence - {agence_nom} - {periode}",
+                        metrics_pdf,
+                        detail_pdf.reset_index(drop=True)
+                    )
+                    bulk_pdf_items.append((
+                        f"agences/{safe_filename(agence_nom)}_{safe_filename(periode)}.pdf",
+                        pdf_bytes
+                    ))
+
+        if bulk_pdf_items:
+            zip_bytes = make_pdf_zip(bulk_pdf_items)
+            st.download_button(
+                f"📦 Télécharger tous les PDF ({len(bulk_pdf_items)} fichiers)",
+                zip_bytes,
+                f"exports_pdf_{safe_filename(periode)}.zip",
+                "application/zip",
+                key=f"zip_pdf_all_{safe_filename(periode)}",
+                on_click="ignore"
+            )
+        else:
+            st.info("Aucun PDF à générer pour cette période.")
 
 else:
     st.info("👉 Charge une période sauvegardée depuis la barre latérale.")
