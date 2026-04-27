@@ -1433,20 +1433,6 @@ if st.sidebar.button("🚪 Déconnexion"):
     st.rerun()
 
 
-# ====================== PARAMÈTRES TEST ======================
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("⚙️ Paramètres")
-
-use_m2_rule = st.sidebar.checkbox(
-    "Activer règle M-2",
-    value=True
-)
-
-if not use_m2_rule:
-    st.sidebar.warning("⚠️ Mode TEST : règle M-2 désactivée")
-
-
 # ====================== SIDEBAR HISTORIQUE ======================
 
 st.sidebar.markdown("---")
@@ -1476,14 +1462,16 @@ if st.sidebar.button("📥 Charger la période"):
 if role == "admin":
 
     st.sidebar.markdown("---")
-    st.sidebar.header("📤 Import ProDevis")
+    with st.sidebar.expander("📤 Import ProDevis", expanded=False):
 
-    f_confirm = st.sidebar.file_uploader("Fichier CONFIRM", type=["xlsx"], key="upload_confirm")
-    f_ok = st.sidebar.file_uploader("Fichier BONLIVR", type=["xlsx"], key="upload_ok")
+        f_confirm = st.file_uploader("Fichier CONFIRM", type=["xlsx"], key="upload_confirm")
+        f_ok = st.file_uploader("Fichier BONLIVR", type=["xlsx"], key="upload_ok")
 
-    periode = st.sidebar.text_input("📅 Période", value="Avril 2026", key="periode_input")
+        periode = st.text_input("📅 Période", value="Avril 2026", key="periode_input")
 
-    if st.sidebar.button("🚀 Lancer le traitement", type="primary"):
+        lancer_traitement = st.button("🚀 Lancer le traitement", type="primary")
+
+    if lancer_traitement:
 
         if not f_confirm or not f_ok:
             st.error("❌ Charge les deux fichiers : CONFIRM et BONLIVR.")
@@ -1830,6 +1818,20 @@ if role == "admin":
         save_periode(periode, data_to_save)
 
         st.success(f"✅ {periode} chargé et sauvegardé avec succès !")
+
+
+# ====================== PARAMÈTRE ANNUEL ======================
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Paramètre annuel")
+use_m2_rule = st.sidebar.checkbox(
+    "Règle M-2",
+    value=True,
+    help="Filtre l'analyse annuelle sur les mois comptablement finalisés."
+)
+
+if not use_m2_rule:
+    st.sidebar.caption("Mode test : M-2 désactivé")
 
 
 # ====================== BACK OFFICE USERS ======================
