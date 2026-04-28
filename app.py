@@ -121,12 +121,26 @@ button[data-baseweb="tab"][aria-selected="true"] {
 .stButton > button {
     border-radius: 10px;
     font-weight: 600;
-    background: #1F2933;
-    color: white !important;
+    background: #FFFFFF !important;
+    color: #1F2933 !important;
+    border: 1px solid #D1D5DB !important;
+}
+
+.stButton > button:hover {
+    background: #F6F8F4 !important;
+    color: #1F2933 !important;
+    border-color: #66B32E !important;
 }
 
 .stButton > button[kind="primary"] {
     background-color: #66B32E !important;
+    color: white !important;
+    border-color: #66B32E !important;
+}
+
+.stButton > button[kind="primary"]:hover {
+    background-color: #4F9A23 !important;
+    color: white !important;
 }
 
 /* ALERTES */
