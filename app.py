@@ -1393,6 +1393,7 @@ def pdf_format_value(value):
     return pdf_text(value)
 
 
+@st.cache_data(show_spinner=False)
 def make_simple_pdf(title, metrics, df):
     page_w, page_h = 841.89, 595.28
     margin = 24
@@ -1840,14 +1841,22 @@ def save_periode(periode, data):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
     with open(file_path, "wb") as f:
         pickle.dump(data, f)
+    load_periode_cached.clear()
+    load_all_historique_cached.clear()
+
+
+@st.cache_data(show_spinner=False)
+def load_periode_cached(periode, file_mtime_ns):
+    file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
+    with open(file_path, "rb") as f:
+        return pickle.load(f)
 
 
 def load_periode(periode):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
-    if file_path.exists():
-        with open(file_path, "rb") as f:
-            return pickle.load(f)
-    return None
+    if not file_path.exists():
+        return None
+    return load_periode_cached(periode, file_path.stat().st_mtime_ns)
 
 
 def load_periode_preserve_ui(periode):
@@ -1881,6 +1890,8 @@ def delete_periode(periode):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
     if file_path.exists():
         file_path.unlink()
+        load_periode_cached.clear()
+        load_all_historique_cached.clear()
         return True
     return False
 
@@ -1987,7 +1998,14 @@ def is_periode_comptable_annuelle(periode, annee_selectionnee, use_m2=True):
     return mois <= today.month - 2
 
 
-def load_all_historique():
+def historique_signature():
+    return tuple(
+        sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in HISTORIQUE_DIR.glob("*.pkl"))
+    )
+
+
+@st.cache_data(show_spinner=False)
+def load_all_historique_cached(signature):
     rows_vendeurs = []
     rows_agences = []
     rows_directeurs = []
@@ -2029,11 +2047,22 @@ def load_all_historique():
     return df_all_vendeurs, df_all_agences, df_all_directeurs
 
 
+def load_all_historique():
+    return load_all_historique_cached(historique_signature())
+
+
 # ====================== FORMAT TABLEAUX ======================
 
 def format_df_vendeurs(df):
     if df.empty:
         return df
+    technical_cols = [
+        "ca_commissionnable_directeur_ok",
+        "ca_commissionnable_directeur_total",
+        "nb_remise_plus_30_ok",
+        "nb_remise_plus_30_total",
+    ]
+    df = df.drop(columns=technical_cols, errors="ignore")
     return df.rename(columns={
         "ca_ok": "CA OK",
         "ca_attente": "CA en attente",
@@ -2223,6 +2252,7 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.user = pending_user
                     st.session_state.username = pending_2fa_user
+                    st.session_state.pop(f"sidebar_auto_collapsed_{pending_user.get('role')}", None)
                     st.rerun()
                 else:
                     st.error("Code Authenticator incorrect.")
@@ -2265,6 +2295,7 @@ if not st.session_state.logged_in:
                 st.session_state.logged_in = True
                 st.session_state.user = user
                 st.session_state.username = username_key
+                st.session_state.pop(f"sidebar_auto_collapsed_{user.get('role')}", None)
                 st.rerun()
             else:
                 register_failed_login()
@@ -2279,19 +2310,29 @@ if not st.session_state.logged_in:
 user = st.session_state.user
 role = user["role"]
 
-if role in ["admin", "vendeur"] and not st.session_state.get(f"sidebar_auto_collapsed_{role}"):
+if role in ["admin", "vendeur", "directeur_agence"] and not st.session_state.get(f"sidebar_auto_collapsed_{role}"):
     components.html(
         """
         <script>
-        setTimeout(() => {
+        let attempts = 0;
+        const closeSidebar = () => {
+            attempts += 1;
             const doc = window.parent.document;
             const sidebar = doc.querySelector('[data-testid="stSidebar"]');
-            const collapseButton = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+            const collapseButton =
+                doc.querySelector('[data-testid="stSidebarCollapseButton"]') ||
+                doc.querySelector('button[aria-label="Close sidebar"]') ||
+                doc.querySelector('button[title="Close sidebar"]');
             const isOpen = sidebar && sidebar.getBoundingClientRect().width > 80;
             if (isOpen && collapseButton) {
                 collapseButton.click();
+                return;
             }
-        }, 450);
+            if (attempts < 20) {
+                setTimeout(closeSidebar, 150);
+            }
+        };
+        setTimeout(closeSidebar, 150);
         </script>
         """,
         height=0,
@@ -2315,7 +2356,12 @@ with col2:
 st.sidebar.success(f"Connecté : {user['nom']} ({role})")
 
 if st.sidebar.button("🚪 Déconnexion"):
-    for k in ["logged_in", "user", "username"]:
+    for k in [
+        "logged_in", "user", "username",
+        "sidebar_auto_collapsed_admin",
+        "sidebar_auto_collapsed_vendeur",
+        "sidebar_auto_collapsed_directeur_agence",
+    ]:
         if k in st.session_state:
             del st.session_state[k]
     st.rerun()
