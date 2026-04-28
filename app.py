@@ -2123,23 +2123,23 @@ if not st.session_state.logged_in:
             height: 100vh;
             object-fit: cover;
             z-index: 0;
-            opacity: 0.34;
+            opacity: 0.24;
             pointer-events: none;
         }}
 
         .login-video-overlay {{
             position: fixed;
             inset: 0;
-            background: rgba(246, 248, 244, 0.72);
-            backdrop-filter: blur(1px);
-            z-index: 0;
+            background: rgba(246, 248, 244, 0.48);
+            backdrop-filter: blur(0.5px);
+            z-index: 1;
             pointer-events: none;
         }}
 
         [data-testid="stAppViewContainer"] > .main,
         [data-testid="stHeader"] {{
             position: relative;
-            z-index: 1;
+            z-index: 2;
         }}
 
         .login-brand {{
@@ -2150,12 +2150,17 @@ if not st.session_state.logged_in:
             width: 100%;
             margin: 56px 0 22px;
             text-align: center;
+            position: relative;
+            z-index: 4;
+            opacity: 1 !important;
         }}
 
         .login-brand img {{
             width: 150px;
             display: block;
             margin: 0 auto 24px;
+            opacity: 1 !important;
+            filter: drop-shadow(0 8px 16px rgba(18, 38, 58, 0.16));
         }}
 
         .login-brand h1 {{
@@ -2163,6 +2168,15 @@ if not st.session_state.logged_in:
             font-size: 40px;
             font-weight: 800;
             text-align: center;
+            color: #12263A !important;
+            opacity: 1 !important;
+            text-shadow: 0 2px 8px rgba(255, 255, 255, 0.85);
+        }}
+
+        [data-testid="stTextInput"],
+        [data-testid="stButton"] {{
+            position: relative;
+            z-index: 4;
         }}
 
         .login-logo-fallback {{
@@ -3620,46 +3634,74 @@ if st.session_state.get("df_vendeurs") is not None:
         )
         st.stop()
 
-    df_vendeurs_all = recompute_df_vendeurs_indicators(
-        st.session_state.df_vendeurs.copy(),
-        st.session_state.df_ok.copy(),
-        st.session_state.df_c.copy(),
+    periode = st.session_state.get("periode", "Mois inconnu")
+    indicateurs_cache_key = (
+        periode,
+        id(st.session_state.df_vendeurs),
+        id(st.session_state.get("df_agences", None)),
+        id(st.session_state.df_ok),
+        id(st.session_state.df_c),
         st.session_state.col_vente,
         st.session_state.col_catalogue,
         st.session_state.col_rem,
         st.session_state.col_op,
-        [
-            st.session_state.col_com1,
-            st.session_state.col_com2,
-            st.session_state.col_com3
-        ],
-        st.session_state.key_cols,
         st.session_state.col_client,
         st.session_state.col_agence,
-        st.session_state.col_ca_magasin
-    )
-    st.session_state.df_vendeurs = df_vendeurs_all.copy()
-    df_agences_all = st.session_state.get("df_agences", pd.DataFrame()).copy()
-    df_agences_all = recompute_df_agences_attente(
-        df_agences_all,
-        st.session_state.df_ok.copy(),
-        st.session_state.df_c.copy(),
-        st.session_state.key_cols,
-        st.session_state.col_client,
-        st.session_state.col_agence,
-        st.session_state.col_vente,
         st.session_state.col_ca_magasin,
-        st.session_state.col_catalogue,
-        st.session_state.col_op,
-        [
-            st.session_state.col_com1,
-            st.session_state.col_com2,
-            st.session_state.col_com3
-        ]
+        st.session_state.col_com1,
+        st.session_state.col_com2,
+        st.session_state.col_com3,
+        tuple(st.session_state.key_cols),
     )
-    st.session_state.df_agences = df_agences_all.copy()
+    indicateurs_cache = st.session_state.get("_indicateurs_cache", {})
+
+    if indicateurs_cache.get("key") == indicateurs_cache_key:
+        df_vendeurs_all = indicateurs_cache["df_vendeurs"].copy()
+        df_agences_all = indicateurs_cache["df_agences"].copy()
+    else:
+        df_vendeurs_all = recompute_df_vendeurs_indicators(
+            st.session_state.df_vendeurs.copy(),
+            st.session_state.df_ok.copy(),
+            st.session_state.df_c.copy(),
+            st.session_state.col_vente,
+            st.session_state.col_catalogue,
+            st.session_state.col_rem,
+            st.session_state.col_op,
+            [
+                st.session_state.col_com1,
+                st.session_state.col_com2,
+                st.session_state.col_com3
+            ],
+            st.session_state.key_cols,
+            st.session_state.col_client,
+            st.session_state.col_agence,
+            st.session_state.col_ca_magasin
+        )
+        df_agences_all = st.session_state.get("df_agences", pd.DataFrame()).copy()
+        df_agences_all = recompute_df_agences_attente(
+            df_agences_all,
+            st.session_state.df_ok.copy(),
+            st.session_state.df_c.copy(),
+            st.session_state.key_cols,
+            st.session_state.col_client,
+            st.session_state.col_agence,
+            st.session_state.col_vente,
+            st.session_state.col_ca_magasin,
+            st.session_state.col_catalogue,
+            st.session_state.col_op,
+            [
+                st.session_state.col_com1,
+                st.session_state.col_com2,
+                st.session_state.col_com3
+            ]
+        )
+        st.session_state["_indicateurs_cache"] = {
+            "key": indicateurs_cache_key,
+            "df_vendeurs": df_vendeurs_all.copy(),
+            "df_agences": df_agences_all.copy(),
+        }
+
     df_directeurs_all = st.session_state.get("df_directeurs", pd.DataFrame()).copy()
-    periode = st.session_state.get("periode", "Mois inconnu")
 
     # ====================== FILTRAGE ROLE ======================
 
