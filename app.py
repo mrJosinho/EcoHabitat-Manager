@@ -18,7 +18,7 @@ import io
 import zipfile
 import unicodedata
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from openpyxl import load_workbook
 
 # ====================== CONFIG ======================
@@ -142,10 +142,57 @@ button[data-baseweb="tab"][aria-selected="true"] {
 }
 
 .eco-card-value {
-    font-size: 24px;
+    font-size: clamp(18px, 1.45vw, 24px);
     font-weight: 800;
     color: #1F2933 !important;
     margin-top: 8px;
+    white-space: nowrap;
+}
+
+.commission-summary {
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 8px auto 18px auto;
+    width: 100%;
+}
+
+.commission-pill {
+    background: #FFFFFF;
+    border: 1px solid #E5E7EB;
+    border-radius: 10px;
+    padding: 10px 14px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+.commission-pill {
+    min-width: 190px;
+    text-align: center;
+}
+
+.commission-pill span {
+    display: block;
+    color: #6B7280 !important;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.commission-pill strong {
+    display: block;
+    margin-top: 3px;
+    font-size: 18px;
+    color: #1F2933 !important;
+}
+
+.commission-pill.points {
+    border-color: #FCD34D;
+}
+
+.commission-pill.final {
+    border-color: #66B32E;
+    background: #F0F9EB;
 }
 
 /* CORRECTION BOUTONS SIDEBAR */
@@ -247,6 +294,52 @@ def password_is_strong_enough(password):
     )
 
 
+def generate_totp_secret():
+    return base64.b32encode(secrets.token_bytes(20)).decode("utf-8").rstrip("=")
+
+
+def hotp(secret, counter, digits=6):
+    normalized_secret = str(secret or "").replace(" ", "").upper()
+    padding = "=" * ((8 - len(normalized_secret) % 8) % 8)
+    key = base64.b32decode(normalized_secret + padding)
+    counter_bytes = int(counter).to_bytes(8, "big")
+    digest = hmac.new(key, counter_bytes, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(code % (10 ** digits)).zfill(digits)
+
+
+def verify_totp(secret, code, period=30, window=1):
+    code = re.sub(r"\D", "", str(code or ""))
+    if len(code) != 6 or not secret:
+        return False
+
+    current_counter = int(time.time() // period)
+    for drift in range(-window, window + 1):
+        if hmac.compare_digest(hotp(secret, current_counter + drift), code):
+            return True
+    return False
+
+
+def totp_uri(username, secret, issuer="gesCom EcoHabitat"):
+    label = f"{issuer}:{username}"
+    params = urlencode({
+        "secret": secret,
+        "issuer": issuer,
+        "algorithm": "SHA1",
+        "digits": 6,
+        "period": 30,
+    })
+    return f"otpauth://totp/{quote(label)}?{params}"
+
+
+def qr_code_url(uri):
+    return "https://api.qrserver.com/v1/create-qr-code/?" + urlencode({
+        "size": "220x220",
+        "data": uri
+    })
+
+
 def get_login_lock_remaining():
     locked_until = st.session_state.get("login_locked_until", 0)
     return max(0, int(locked_until - time.time()))
@@ -336,10 +429,30 @@ def save_motifs_attente(data):
 # ====================== FONCTIONS DESIGN ======================
 
 def card(title, value):
+    value = str(value).replace(" €", "&nbsp;€").replace(" %", "&nbsp;%")
     st.markdown(f"""
     <div class="eco-card">
         <div class="eco-card-title">{title}</div>
         <div class="eco-card-value">{value}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def commission_summary_bar(base_pct, points_perdus, commission_pct):
+    st.markdown(f"""
+    <div class="commission-summary">
+        <div class="commission-pill">
+            <span>📐 Base commission</span>
+            <strong>{base_pct:,.0f} %</strong>
+        </div>
+        <div class="commission-pill points">
+            <span>⚠️ Points perdus</span>
+            <strong>{points_perdus:,.0f}</strong>
+        </div>
+        <div class="commission-pill final">
+            <span>✅ Commission définitive</span>
+            <strong>{commission_pct:,.0f} %</strong>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -656,6 +769,35 @@ def calculate_commission(ca_ok, remise_pct):
     return base, points, commission_pct, commission_euro
 
 
+def row_remise_pct(row, col_rem, col_catalogue):
+    if not col_rem or col_rem not in row.index or not col_catalogue or col_catalogue not in row.index:
+        return 0.0
+
+    remise = to_float(row.get(col_rem))
+    catalogue = to_float(row.get(col_catalogue))
+    return (remise / catalogue * 100) if catalogue > 0 else 0.0
+
+
+def calculate_directeur_commission(detail, col_vente, col_rem, col_catalogue):
+    if detail.empty or not col_vente or col_vente not in detail.columns:
+        return 0.0, 10, 0, 10, 0.0
+
+    ca_commissionnable = sum_numeric_col(detail, col_vente)
+    commission_euro = round(ca_commissionnable * 0.10, 2)
+    return round(ca_commissionnable, 2), 10, 0, 10, commission_euro
+
+
+def count_remise_over_threshold(detail, col_rem, col_catalogue, threshold=30):
+    if detail.empty:
+        return 0
+    return int(
+        detail.apply(
+            lambda row: row_remise_pct(row, col_rem, col_catalogue) > threshold,
+            axis=1
+        ).sum()
+    )
+
+
 def find_col(df, includes=None, excludes=None):
     includes = includes or []
     excludes = excludes or []
@@ -834,6 +976,12 @@ def calculate_remise_pct(df, col_catalogue, col_rem, col_op):
     return round(remise.sum() / total_catalogue * 100, 2) if total_catalogue > 0 else 0.0
 
 
+def count_opc_rows(df, col_op):
+    if df.empty or not col_op or col_op not in df.columns:
+        return 0
+    return int(df.apply(lambda row: is_opc(row, col_op), axis=1).sum())
+
+
 def ensure_remise_columns(df):
     if df.empty:
         return df
@@ -904,9 +1052,49 @@ def recompute_df_vendeurs_indicators(
         )
         ca_ok = sum_numeric_col(ok_detail, col_vente)
         ca_attente = sum_numeric_col(attente_detail, col_vente)
+        nb_ok = len(ok_detail)
+        nb_total = len(ok_detail) + len(attente_detail)
+        detail_global = pd.concat([ok_detail, attente_detail], ignore_index=True)
+        nb_opc_total = count_opc_rows(detail_global, col_op)
+        ratio_opc_total = round(nb_opc_total / nb_total * 100, 2) if nb_total > 0 else 0.0
+
         df_vendeurs.at[idx, "ca_ok"] = round(ca_ok, 2)
         df_vendeurs.at[idx, "ca_attente"] = round(ca_attente, 2)
         df_vendeurs.at[idx, "ca_total"] = round(ca_ok + ca_attente, 2)
+        df_vendeurs.at[idx, "nb_ok"] = nb_ok
+        df_vendeurs.at[idx, "nb_total"] = nb_total
+        df_vendeurs.at[idx, "nb_opc_total"] = nb_opc_total
+        df_vendeurs.at[idx, "ratio_opc_total_pct"] = ratio_opc_total
+
+        if is_responsable_agence(row.get("Commercial")):
+            ca_commissionnable_ok, base_comm, points, comm_def, euro = calculate_directeur_commission(
+                ok_detail,
+                col_vente,
+                col_rem,
+                col_catalogue
+            )
+            ca_commissionnable_total, _, _, _, _ = calculate_directeur_commission(
+                detail_global,
+                col_vente,
+                col_rem,
+                col_catalogue
+            )
+            df_vendeurs.at[idx, "ca_commissionnable_directeur_ok"] = ca_commissionnable_ok
+            df_vendeurs.at[idx, "ca_commissionnable_directeur_total"] = ca_commissionnable_total
+            df_vendeurs.at[idx, "nb_remise_plus_30_ok"] = count_remise_over_threshold(
+                ok_detail,
+                col_rem,
+                col_catalogue
+            )
+            df_vendeurs.at[idx, "nb_remise_plus_30_total"] = count_remise_over_threshold(
+                detail_global,
+                col_rem,
+                col_catalogue
+            )
+            df_vendeurs.at[idx, "base_commission_pct"] = base_comm
+            df_vendeurs.at[idx, "points_perdus"] = points
+            df_vendeurs.at[idx, "commission_pct"] = comm_def
+            df_vendeurs.at[idx, "commission_eur"] = euro
 
         remise_values = remises.get(k, {})
         ok_catalogue_total = remise_values.get("ok_catalogue_total", 0.0)
@@ -1046,7 +1234,7 @@ def sum_numeric_col(df, col):
     return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
 
 
-def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue):
+def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue, col_op=None, colonnes_commerciaux=None):
     if df_agences.empty or not col_agence:
         return df_agences
 
@@ -1069,13 +1257,34 @@ def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, 
 
         ca_ok = sum_numeric_col(ok_detail, col_ca_magasin)
         ca_attente = sum_numeric_col(attente_detail, col_ca_magasin)
+        nb_ok = len(ok_detail)
+        nb_total = len(ok_detail) + len(attente_detail)
+        detail_global = pd.concat([ok_detail, attente_detail], ignore_index=True)
+        nb_opc_total = count_opc_rows(detail_global, col_op)
+        ratio_opc_total = round(nb_opc_total / nb_total * 100, 2) if nb_total > 0 else 0.0
+        if colonnes_commerciaux:
+            bonus_malus_ok = ok_detail.apply(
+                lambda ligne: calculate_bonus_malus_row(
+                    ligne,
+                    col_vente,
+                    col_catalogue,
+                    col_op,
+                    colonnes_commerciaux
+                ),
+                axis=1
+            ).sum() if not ok_detail.empty else 0.0
+        else:
+            bonus_malus_ok = 0.0
 
         df_agences.at[idx, "ca_ok"] = round(ca_ok, 2)
         df_agences.at[idx, "ca_attente"] = round(ca_attente, 2)
         df_agences.at[idx, "ca_total"] = round(ca_ok + ca_attente, 2)
         df_agences.at[idx, "ca_magasin_ok"] = round(ca_ok, 2)
-        df_agences.at[idx, "nb_ok"] = len(ok_detail)
-        df_agences.at[idx, "nb_total"] = len(ok_detail) + len(attente_detail)
+        df_agences.at[idx, "bonus_malus_ok"] = round(bonus_malus_ok, 2)
+        df_agences.at[idx, "nb_ok"] = nb_ok
+        df_agences.at[idx, "nb_total"] = nb_total
+        df_agences.at[idx, "nb_opc_total"] = nb_opc_total
+        df_agences.at[idx, "ratio_opc_total_pct"] = ratio_opc_total
 
     return df_agences
 
@@ -1524,7 +1733,7 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
         "CA OK agence": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
         "CA attente agence": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
         "CA Total agence": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
-        "CA magasin OK": f"{to_float(data.get('ca_magasin_ok', 0)):,.2f} EUR",
+        "Bonus / Malus OK": f"{to_float(data.get('bonus_malus_ok', 0)):,.2f} EUR",
         "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
     }
 
@@ -1839,6 +2048,9 @@ def format_df_vendeurs(df):
         "commission_eur": "Commission €",
         "bonus_malus_ok": "Bonus / Malus OK",
         "bonus_malus_global": "Bonus / Malus Global",
+        "nb_ok": "Nb affaires OK",
+        "nb_opc_total": "Nb OPC total",
+        "ratio_opc_total_pct": "Ratio OPC total %",
     })
 
 
@@ -1851,9 +2063,12 @@ def format_df_agences(df):
         "ca_attente": "CA en attente",
         "ca_total": "CA Total",
         "ca_magasin_ok": "CA magasin OK",
+        "bonus_malus_ok": "Bonus / Malus OK",
         "remise_pct": "Remise moyenne %",
         "nb_ok": "Nb affaires OK",
         "nb_total": "Nb affaires total",
+        "nb_opc_total": "Nb OPC total",
+        "ratio_opc_total_pct": "Ratio OPC total %",
     })
 
 
@@ -1883,9 +2098,50 @@ if not st.session_state.logged_in:
     else:
         logo_html = "<div class='login-logo-fallback'>🏠</div>"
 
+    login_video_html = ""
+    for video_name, mime_type in [
+        ("login_background.mp4", "video/mp4"),
+        ("login_background.webm", "video/webm"),
+    ]:
+        video_path = Path(video_name)
+        if video_path.exists():
+            video_b64 = base64.b64encode(video_path.read_bytes()).decode("utf-8")
+            login_video_html = (
+                f'<video class="login-video-bg" autoplay muted loop playsinline>'
+                f'<source src="data:{mime_type};base64,{video_b64}" type="{mime_type}">'
+                f'</video><div class="login-video-overlay"></div>'
+            )
+            break
+
     st.markdown(
         f"""
         <style>
+        .login-video-bg {{
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: 0;
+            opacity: 0.34;
+            pointer-events: none;
+        }}
+
+        .login-video-overlay {{
+            position: fixed;
+            inset: 0;
+            background: rgba(246, 248, 244, 0.72);
+            backdrop-filter: blur(1px);
+            z-index: 0;
+            pointer-events: none;
+        }}
+
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stHeader"] {{
+            position: relative;
+            z-index: 1;
+        }}
+
         .login-brand {{
             display: flex;
             flex-direction: column;
@@ -1915,6 +2171,7 @@ if not st.session_state.logged_in:
             margin-bottom: 24px;
         }}
         </style>
+        {login_video_html}
         <div class="login-brand">
             {logo_html}
             <h1>🔐 Connexion - ECOHABITAT</h1>
@@ -1925,6 +2182,38 @@ if not st.session_state.logged_in:
 
     username = st.text_input("Identifiant")
     password = st.text_input("Mot de passe", type="password")
+    totp_code = st.text_input("Code Authenticator", max_chars=6, help="À renseigner uniquement si la 2FA est activée.")
+
+    pending_2fa_user = st.session_state.get("pending_2fa_setup_user")
+    if pending_2fa_user:
+        users = load_users()
+        pending_user = users.get(pending_2fa_user)
+        if pending_user and pending_user.get("totp_enabled") and not pending_user.get("totp_confirmed"):
+            pending_secret = pending_user.get("totp_secret") or generate_totp_secret()
+            pending_user["totp_secret"] = pending_secret
+            users[pending_2fa_user] = pending_user
+            save_users(users)
+
+            st.info("Première connexion 2FA : scanne ce QR code avec Google Authenticator ou Microsoft Authenticator, puis saisis le code généré.")
+            st.image(qr_code_url(totp_uri(pending_2fa_user, pending_secret)), width=220)
+            st.code(pending_secret, language=None)
+            first_totp_code = st.text_input("Code après scan", max_chars=6, key="first_totp_code")
+
+            if st.button("Activer Authenticator et se connecter", type="primary"):
+                if verify_totp(pending_secret, first_totp_code):
+                    pending_user["totp_confirmed"] = True
+                    users[pending_2fa_user] = pending_user
+                    save_users(users)
+                    reset_login_security_state()
+                    st.session_state.pop("pending_2fa_setup_user", None)
+                    st.session_state.logged_in = True
+                    st.session_state.user = pending_user
+                    st.session_state.username = pending_2fa_user
+                    st.rerun()
+                else:
+                    st.error("Code Authenticator incorrect.")
+        else:
+            st.session_state.pop("pending_2fa_setup_user", None)
 
     if st.button("Se connecter", type="primary"):
         remaining_lock = get_login_lock_remaining()
@@ -1938,6 +2227,20 @@ if not st.session_state.logged_in:
             stored_password = user.get("password_hash") or user.get("password") if user else ""
 
             if user and verify_password(password, stored_password):
+                if user.get("totp_enabled") and not user.get("totp_confirmed"):
+                    if not user.get("totp_secret"):
+                        user["totp_secret"] = generate_totp_secret()
+                    users[username_key] = user
+                    save_users(users)
+                    st.session_state.pending_2fa_setup_user = username_key
+                    st.rerun()
+
+                if user.get("totp_enabled"):
+                    if not verify_totp(user.get("totp_secret"), totp_code):
+                        register_failed_login()
+                        st.error("Code Authenticator incorrect.")
+                        st.stop()
+
                 if not password_is_hashed(user):
                     user["password_hash"] = hash_password(password)
                     user.pop("password", None)
@@ -1961,6 +2264,26 @@ if not st.session_state.logged_in:
 
 user = st.session_state.user
 role = user["role"]
+
+if role in ["admin", "vendeur"] and not st.session_state.get(f"sidebar_auto_collapsed_{role}"):
+    components.html(
+        """
+        <script>
+        setTimeout(() => {
+            const doc = window.parent.document;
+            const sidebar = doc.querySelector('[data-testid="stSidebar"]');
+            const collapseButton = doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+            const isOpen = sidebar && sidebar.getBoundingClientRect().width > 80;
+            if (isOpen && collapseButton) {
+                collapseButton.click();
+            }
+        }, 450);
+        </script>
+        """,
+        height=0,
+        width=0
+    )
+    st.session_state[f"sidebar_auto_collapsed_{role}"] = True
 
 
 col1, col2 = st.columns([1, 6])
@@ -2399,10 +2722,10 @@ if role == "admin":
         st.success(f"✅ {periode} chargé et sauvegardé avec succès !")
 
 
-# ====================== PARAMÈTRE ANNUEL ======================
+# ====================== OUTILS SIDEBAR ======================
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("⚙️ Paramètre annuel", expanded=False):
+with st.sidebar.expander("🧰 Outils", expanded=False):
     use_m2_rule = st.checkbox(
         "Règle M-2",
         value=True,
@@ -2411,6 +2734,149 @@ with st.sidebar.expander("⚙️ Paramètre annuel", expanded=False):
 
     if not use_m2_rule:
         st.caption("Mode test : M-2 désactivé")
+
+    if role == "admin" and st.session_state.get("df_vendeurs") is not None:
+        st.divider()
+        st.caption("📊 Mise à jour EVP mensuelle")
+
+        periode_tools = st.session_state.get("periode", "Mois inconnu")
+        df_vendeurs_tools = st.session_state.get("df_vendeurs", pd.DataFrame())
+        df_agences_tools = st.session_state.get("df_agences", pd.DataFrame())
+        df_directeurs_tools = st.session_state.get("df_directeurs", pd.DataFrame())
+        target_sheet_evp = sheet_name_evp_for_next_month(periode_tools)
+        st.caption(f"{periode_tools} → EVP {target_sheet_evp or 'à déterminer'}")
+
+        evp_file = st.file_uploader(
+            "Uploader EVP mensuelle.xlsx",
+            type=["xlsx"],
+            key=f"sidebar_evp_upload_{safe_filename(periode_tools)}"
+        )
+
+        if evp_file:
+            try:
+                evp_bytes, evp_error, evp_absents = update_evp_workbook(
+                    evp_file,
+                    df_vendeurs_tools,
+                    df_directeurs_tools,
+                    periode_tools
+                )
+
+                if evp_error:
+                    st.error(f"❌ {evp_error}")
+                else:
+                    st.download_button(
+                        "📥 Télécharger EVP",
+                        evp_bytes,
+                        f"EVP_mensuelle_mis_a_jour_{safe_filename(periode_tools)}.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"sidebar_evp_download_{safe_filename(periode_tools)}",
+                        on_click="ignore"
+                    )
+
+                    if evp_absents:
+                        st.warning("Noms absents EVP : " + ", ".join(evp_absents))
+                    else:
+                        st.success("EVP prêt ✅")
+            except Exception as exc:
+                st.error(f"❌ EVP impossible : {exc}")
+
+        st.divider()
+        st.caption("📦 Exports PDF groupés")
+
+        required_pdf_keys = [
+            "col_client", "col_doc", "col_date", "col_op",
+            "col_ca_magasin", "col_vente", "col_rem", "col_catalogue",
+            "col_agence", "col_com1", "col_com2", "col_com3",
+            "key_cols", "df_ok", "df_c"
+        ]
+
+        if all(k in st.session_state for k in required_pdf_keys):
+            pdf_cols = {
+                "client": st.session_state.col_client,
+                "doc": st.session_state.col_doc,
+                "date": st.session_state.col_date,
+                "op": st.session_state.col_op,
+                "ca_magasin": st.session_state.col_ca_magasin,
+                "vente": st.session_state.col_vente,
+                "rem": st.session_state.col_rem,
+                "catalogue": st.session_state.col_catalogue,
+                "agence": st.session_state.col_agence,
+                "commerciaux": [
+                    st.session_state.col_com1,
+                    st.session_state.col_com2,
+                    st.session_state.col_com3
+                ],
+            }
+
+            bulk_pdf_items = []
+
+            with st.spinner("Préparation PDF..."):
+                for _, vendeur_row in df_vendeurs_tools.sort_values("Commercial").iterrows():
+                    vendeur_nom = vendeur_row.get("Commercial", "")
+                    detail_pdf, metrics_pdf = build_detail_vendeur_pdf(
+                        vendeur_nom,
+                        vendeur_row,
+                        st.session_state.df_ok.copy(),
+                        st.session_state.df_c.copy(),
+                        pdf_cols["commerciaux"],
+                        st.session_state.key_cols,
+                        pdf_cols,
+                        periode_tools
+                    )
+
+                    if detail_pdf is None:
+                        continue
+
+                    pdf_bytes = make_simple_pdf(
+                        f"Detail des affaires - {vendeur_nom} - {periode_tools}",
+                        metrics_pdf,
+                        detail_pdf.reset_index(drop=True)
+                    )
+                    bulk_pdf_items.append((
+                        f"vendeurs/{safe_filename(vendeur_nom)}_{safe_filename(periode_tools)}.pdf",
+                        pdf_bytes
+                    ))
+
+                if not df_agences_tools.empty:
+                    for _, agence_row in df_agences_tools.sort_values("agence").iterrows():
+                        agence_nom = agence_row.get("agence", "")
+                        detail_pdf, metrics_pdf = build_detail_agence_pdf(
+                            agence_nom,
+                            agence_row,
+                            st.session_state.df_ok.copy(),
+                            st.session_state.df_c.copy(),
+                            st.session_state.key_cols,
+                            pdf_cols,
+                            periode_tools
+                        )
+
+                        if detail_pdf is None:
+                            continue
+
+                        pdf_bytes = make_simple_pdf(
+                            f"Detail des affaires agence - {agence_nom} - {periode_tools}",
+                            metrics_pdf,
+                            detail_pdf.reset_index(drop=True)
+                        )
+                        bulk_pdf_items.append((
+                            f"agences/{safe_filename(agence_nom)}_{safe_filename(periode_tools)}.pdf",
+                            pdf_bytes
+                        ))
+
+            if bulk_pdf_items:
+                zip_bytes = make_pdf_zip(bulk_pdf_items)
+                st.download_button(
+                    f"📦 Télécharger PDF ({len(bulk_pdf_items)})",
+                    zip_bytes,
+                    f"exports_pdf_{safe_filename(periode_tools)}.zip",
+                    "application/zip",
+                    key=f"sidebar_zip_pdf_all_{safe_filename(periode_tools)}",
+                    on_click="ignore"
+                )
+            else:
+                st.info("Aucun PDF à générer.")
+        else:
+            st.caption("Charge une période pour activer les exports.")
 
 
 # ====================== BACK OFFICE USERS ======================
@@ -2428,7 +2894,11 @@ def afficher_admin_users():
             lambda row: "Oui" if str(row.get("password_hash", "")).startswith("pbkdf2_sha256$") else "À migrer",
             axis=1
         )
-        df_users = df_users.drop(columns=["password", "password_hash"], errors="ignore")
+        df_users["2FA"] = df_users.apply(
+            lambda row: "Activée" if row.get("totp_enabled") and row.get("totp_confirmed") else ("À configurer" if row.get("totp_enabled") else "Non"),
+            axis=1
+        )
+        df_users = df_users.drop(columns=["password", "password_hash", "totp_secret"], errors="ignore")
         df_users.index.name = "Identifiant"
         st.dataframe(df_users, use_container_width=True)
     else:
@@ -2448,6 +2918,7 @@ def afficher_admin_users():
         new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence"], key="new_role")
         new_nom = st.text_input("Nom vendeur / utilisateur", key="new_nom").upper().strip()
         new_agence = st.text_input("Agence si directeur", key="new_agence").upper().strip()
+        new_totp_enabled = st.checkbox("Activer Authenticator (2FA)", key="new_totp_enabled")
 
     if st.button("Créer utilisateur", type="primary"):
         if not new_user or not new_password or not new_nom:
@@ -2461,7 +2932,10 @@ def afficher_admin_users():
                 "password_hash": hash_password(new_password),
                 "role": new_role,
                 "nom": new_nom,
-                "agence": new_agence if new_role == "directeur_agence" else None
+                "agence": new_agence if new_role == "directeur_agence" else None,
+                "totp_enabled": bool(new_totp_enabled),
+                "totp_secret": generate_totp_secret() if new_totp_enabled else "",
+                "totp_confirmed": False
             }
             save_users(users)
             st.success("Utilisateur créé ✅")
@@ -2492,12 +2966,35 @@ def afficher_admin_users():
             edit_role = st.selectbox("Rôle", role_options, index=role_index, key="edit_role")
             edit_nom = st.text_input("Nom vendeur / utilisateur", value=u.get("nom", ""), key="edit_nom").upper().strip()
             edit_agence = st.text_input("Agence", value=u.get("agence") or "", key="edit_agence").upper().strip()
+            edit_totp_enabled = st.checkbox(
+                "Activer Authenticator (2FA)",
+                value=bool(u.get("totp_enabled")),
+                key="edit_totp_enabled"
+            )
+
+            if edit_totp_enabled:
+                current_secret = u.get("totp_secret") or generate_totp_secret()
+                setup_uri = totp_uri(user_edit, current_secret)
+                st.caption("QR code à scanner dans Google Authenticator ou Microsoft Authenticator.")
+                st.image(qr_code_url(setup_uri), width=220)
+                st.code(current_secret, language=None)
+
+                if st.button("🔄 Régénérer le secret 2FA", key="regen_totp_secret"):
+                    users[user_edit]["totp_secret"] = generate_totp_secret()
+                    users[user_edit]["totp_enabled"] = True
+                    users[user_edit]["totp_confirmed"] = False
+                    save_users(users)
+                    st.success("Secret 2FA régénéré ✅")
+                    st.rerun()
 
             if st.button("Enregistrer modification"):
                 updated_user = {
                     "role": edit_role,
                     "nom": edit_nom,
-                    "agence": edit_agence if edit_role == "directeur_agence" else None
+                    "agence": edit_agence if edit_role == "directeur_agence" else None,
+                    "totp_enabled": bool(edit_totp_enabled),
+                    "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
+                    "totp_confirmed": bool(u.get("totp_confirmed")) if edit_totp_enabled else False
                 }
 
                 if edit_password:
@@ -2880,32 +3377,82 @@ def afficher_dossiers_en_attente(tab):
         if dossiers_sans_motif:
             st.caption("Motifs manquants à compléter depuis le volet de suivi ci-dessous.")
 
+        filtered_reset = filtered.reset_index(drop=True)
+        selected_rows = []
+        table_state = st.session_state.get("attente_table_selection")
+        try:
+            selected_rows = list(table_state.selection.rows)
+        except Exception:
+            if isinstance(table_state, dict):
+                selected_rows = list(table_state.get("selection", {}).get("rows", []))
+
+        selected_key_from_table = None
+        if selected_rows:
+            selected_pos = selected_rows[0]
+            if 0 <= selected_pos < len(filtered_reset):
+                selected_key_from_table = filtered_reset.iloc[selected_pos].get("_ATTENTE_KEY_", "")
+
         if not filtered.empty:
-            with st.expander("📝 Modifier un motif d'attente / relance", expanded=False):
-                dossier_options = []
-                dossier_labels = {}
+            dossier_options = []
+            dossier_labels = {}
 
-                for display_idx, row in filtered.reset_index(drop=True).iterrows():
-                    key = row.get("_ATTENTE_KEY_", "")
-                    client_label = clean_visible(row.get(col_client, "")) if col_client else "Dossier"
-                    doc_label = clean_visible(row.get(col_doc, "")) if col_doc else ""
-                    agence_label = clean_visible(row.get(col_agence, "")) if col_agence else ""
-                    motif_label = clean_visible(row.get("Motif d'attente", "")) or "À compléter"
-                    label = f"{client_label}"
-                    if doc_label:
-                        label += f" | {doc_label}"
-                    if agence_label:
-                        label += f" | {agence_label}"
-                    label += f" | {motif_label}"
-                    option_key = f"{key}__{display_idx}"
-                    dossier_options.append(option_key)
-                    dossier_labels[option_key] = label
+            for display_idx, row in filtered_reset.iterrows():
+                key = row.get("_ATTENTE_KEY_", "")
+                client_label = clean_visible(row.get(col_client, "")) if col_client else "Dossier"
+                doc_label = clean_visible(row.get(col_doc, "")) if col_doc else ""
+                agence_label = clean_visible(row.get(col_agence, "")) if col_agence else ""
+                motif_label = clean_visible(row.get("Motif d'attente", "")) or "À compléter"
+                label = f"{client_label}"
+                if doc_label:
+                    label += f" | {doc_label}"
+                if agence_label:
+                    label += f" | {agence_label}"
+                label += f" | {motif_label}"
+                option_key = f"{key}__{display_idx}"
+                dossier_options.append(option_key)
+                dossier_labels[option_key] = label
 
+            selected_option_from_table = None
+            if selected_key_from_table:
+                for option in dossier_options:
+                    if option.rsplit("__", 1)[0] == selected_key_from_table:
+                        selected_option_from_table = option
+                        break
+
+            select_key = "attente_dossier_motif_select"
+            if selected_option_from_table:
+                st.session_state[select_key] = selected_option_from_table
+            elif st.session_state.get(select_key) not in dossier_options:
+                st.session_state[select_key] = dossier_options[0]
+
+            st.markdown('<div id="motif-editor-anchor"></div>', unsafe_allow_html=True)
+            if selected_key_from_table:
+                components.html(
+                    """
+                    <script>
+                    const scrollToEditor = () => {
+                        try {
+                            const anchor = window.parent.document.getElementById("motif-editor-anchor");
+                            if (anchor) {
+                                anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+                            }
+                        } catch (error) {}
+                    };
+                    setTimeout(scrollToEditor, 120);
+                    </script>
+                    """,
+                    height=0,
+                )
+
+            with st.expander(
+                "📝 Modifier un motif d'attente / relance",
+                expanded=bool(selected_key_from_table)
+            ):
                 selected_option = st.selectbox(
                     "Dossier à mettre à jour",
                     dossier_options,
                     format_func=lambda key: dossier_labels.get(key, key),
-                    key="attente_dossier_motif_select"
+                    key=select_key
                 )
                 selected_key = selected_option.rsplit("__", 1)[0]
                 selected_row = filtered[filtered["_ATTENTE_KEY_"] == selected_key].iloc[0]
@@ -3004,7 +3551,14 @@ def afficher_dossiers_en_attente(tab):
                 errors="coerce"
             ).dt.strftime("%d/%m/%Y").fillna("")
 
-        st.dataframe(affichage.reset_index(drop=True), use_container_width=True, height=650)
+        st.dataframe(
+            affichage.reset_index(drop=True),
+            use_container_width=True,
+            height=650,
+            key="attente_table_selection",
+            on_select="rerun",
+            selection_mode="single-row"
+        )
 
         if not filtered.empty:
             with st.expander("📧 Mail interne hebdomadaire", expanded=False):
@@ -3095,7 +3649,13 @@ if st.session_state.get("df_vendeurs") is not None:
         st.session_state.col_agence,
         st.session_state.col_vente,
         st.session_state.col_ca_magasin,
-        st.session_state.col_catalogue
+        st.session_state.col_catalogue,
+        st.session_state.col_op,
+        [
+            st.session_state.col_com1,
+            st.session_state.col_com2,
+            st.session_state.col_com3
+        ]
     )
     st.session_state.df_agences = df_agences_all.copy()
     df_directeurs_all = st.session_state.get("df_directeurs", pd.DataFrame()).copy()
@@ -3233,17 +3793,29 @@ if st.session_state.get("df_vendeurs") is not None:
             data = data.iloc[0]
 
             projection_total = st.toggle(
-                "Afficher une projection remise / commission sur CA total",
+                "Afficher la commission sur le CA Total",
                 value=False,
                 key=f"projection_total_{safe_filename(vendeur)}"
             )
 
             if projection_total:
-                remise_commission_affichee = to_float(data.get("remise_hors_opc_global_pct", data.get("remise_global_pct", 0)))
-                base_affichee, points_affiches, commission_pct_affichee, commission_eur_affichee = calculate_commission(
-                    to_float(data.get("ca_total", 0)),
-                    remise_commission_affichee
-                )
+                if is_responsable_agence(vendeur):
+                    base_affichee = 10
+                    points_affiches = 0
+                    commission_pct_affichee = 10
+                    ca_projection_directeur = to_float(
+                        data.get(
+                            "ca_commissionnable_directeur_total",
+                            data.get("ca_total", 0)
+                        )
+                    )
+                    commission_eur_affichee = round(ca_projection_directeur * 0.10, 2)
+                else:
+                    remise_commission_affichee = to_float(data.get("remise_hors_opc_global_pct", data.get("remise_global_pct", 0)))
+                    base_affichee, points_affiches, commission_pct_affichee, commission_eur_affichee = calculate_commission(
+                        to_float(data.get("ca_total", 0)),
+                        remise_commission_affichee
+                    )
                 commission_card_label = "💰 Commission projetée"
                 mode_commission_label = "Projection sur CA total"
             else:
@@ -3255,7 +3827,7 @@ if st.session_state.get("df_vendeurs") is not None:
                 commission_card_label = "💰 Commission"
                 mode_commission_label = "Rémunération réelle sur CA OK"
 
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
 
             with c1:
                 card("✅ CA OK", f"{data['ca_ok']:,.2f} €")
@@ -3269,16 +3841,31 @@ if st.session_state.get("df_vendeurs") is not None:
             with c4:
                 card(commission_card_label, f"{commission_eur_affichee:,.2f} €")
 
-            st.write(
-                f"{mode_commission_label} | "
-                f"Remise commission hors OPC : **{remise_commission_affichee:,.2f} %** | "
-                f"Base commission : **{base_affichee:,.0f} %** | "
-                f"Points perdus : **{points_affiches:,.0f}** | "
-                f"Commission définitive : **{commission_pct_affichee:,.0f} %**"
+            with c5:
+                ratio_opc_vendeur = to_float(data.get("ratio_opc_total_pct", 0))
+                card("🧾 Ratio OPC", f"{ratio_opc_vendeur:,.1f} %")
+
+            commission_summary_bar(
+                base_affichee,
+                points_affiches,
+                commission_pct_affichee
             )
 
+            if is_responsable_agence(vendeur):
+                nb_remise_plus_30 = int(to_float(
+                    data.get(
+                        "nb_remise_plus_30_total" if projection_total else "nb_remise_plus_30_ok",
+                        0
+                    )
+                ))
+                if nb_remise_plus_30 > 0:
+                    st.warning(
+                        f"⚠️ {nb_remise_plus_30} dossier(s) avec une remise supérieure à 30 %. "
+                        "La commission directeur reste calculée à 10 %, à contrôler."
+                    )
+
             vendeur_bonus_malus_global = st.toggle(
-                "Afficher la vision globale Remise + Bonus/Malus",
+                "Afficher la remise et le BONUS/MALUS sur le CA Total",
                 value=False,
                 key=f"vendeur_bonus_malus_global_{safe_filename(vendeur)}"
             )
@@ -3544,7 +4131,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
             data = data.iloc[0]
 
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5 = st.columns(5)
 
             with c1:
                 card("✅ CA OK agence", f"{data['ca_ok']:,.2f} €")
@@ -3556,7 +4143,11 @@ if st.session_state.get("df_vendeurs") is not None:
                 card("📌 CA Total agence", f"{data['ca_total']:,.2f} €")
 
             with c4:
-                card("🏢 CA magasin OK", f"{data['ca_magasin_ok']:,.2f} €")
+                card("🎯 Bonus / Malus OK", f"{to_float(data.get('bonus_malus_ok', 0)):,.2f} €")
+
+            with c5:
+                ratio_opc_agence = to_float(data.get("ratio_opc_total_pct", 0))
+                card("🧾 Ratio OPC", f"{ratio_opc_agence:,.1f} %")
 
             st.write(
                 f"Remise moyenne agence : **{data['remise_pct']} %** | "
@@ -3675,7 +4266,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     "CA OK agence": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
                     "CA attente agence": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
                     "CA Total agence": f"{to_float(data.get('ca_total', 0)):,.2f} EUR",
-                    "CA magasin OK": f"{to_float(data.get('ca_magasin_ok', 0)):,.2f} EUR",
+                    "Bonus / Malus OK": f"{to_float(data.get('bonus_malus_ok', 0)):,.2f} EUR",
                     "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
                 }
                 pdf_bytes = make_simple_pdf(
@@ -3725,6 +4316,21 @@ if st.session_state.get("df_vendeurs") is not None:
             total_attente = df_vendeurs["ca_attente"].sum()
             total_global = df_vendeurs["ca_total"].sum()
             total_commissions = df_vendeurs["commission_eur"].sum()
+            total_affaires_opc_base = (
+                df_vendeurs["nb_total"].sum()
+                if "nb_total" in df_vendeurs.columns
+                else 0
+            )
+            total_affaires_opc = (
+                df_vendeurs["nb_opc_total"].sum()
+                if "nb_opc_total" in df_vendeurs.columns
+                else 0
+            )
+            total_ratio_opc = (
+                round(total_affaires_opc / total_affaires_opc_base * 100, 2)
+                if total_affaires_opc_base > 0
+                else 0.0
+            )
             bonus_malus_col = "bonus_malus_ok"
             bonus_malus_label = "🎯 Bonus / Malus OK"
             remise_label = "🎯 Remise OK hors OPC"
@@ -3746,7 +4352,7 @@ if st.session_state.get("df_vendeurs") is not None:
                 else 0
             )
 
-            c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+            c1, c2, c3, c4 = st.columns(4)
 
             with c1:
                 card("✅ CA OK vendeurs", f"{total_ok:,.2f} €")
@@ -3760,6 +4366,8 @@ if st.session_state.get("df_vendeurs") is not None:
             with c4:
                 card("💰 Commissions vendeurs", f"{total_commissions:,.2f} €")
 
+            c5, c6, c7, c8 = st.columns(4)
+
             with c5:
                 card(remise_label, f"{total_remise:,.2f} %")
 
@@ -3768,6 +4376,9 @@ if st.session_state.get("df_vendeurs") is not None:
 
             with c7:
                 card("🏢 Comm. magasin", f"{total_comm_magasin:,.2f} €")
+
+            with c8:
+                card("🧾 Ratio OPC", f"{total_ratio_opc:,.1f} %")
 
             st.divider()
 
@@ -3847,144 +4458,7 @@ if st.session_state.get("df_vendeurs") is not None:
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
 
-    # ====================== EXPORTS ADMIN ======================
-
-    if role == "admin":
-        st.divider()
-
-        st.subheader("📊 Mise à jour EVP mensuelle")
-        target_sheet_evp = sheet_name_evp_for_next_month(periode)
-        st.caption(
-            f"Source : commandes OK uniquement. Période {periode} → onglet EVP {target_sheet_evp or 'à déterminer'}."
-        )
-        evp_file = st.file_uploader(
-            "Uploader EVP mensuelle.xlsx",
-            type=["xlsx"],
-            key=f"evp_upload_{safe_filename(periode)}"
-        )
-
-        if evp_file:
-            try:
-                evp_bytes, evp_error, evp_absents = update_evp_workbook(
-                    evp_file,
-                    df_vendeurs,
-                    df_directeurs,
-                    periode
-                )
-
-                if evp_error:
-                    st.error(f"❌ {evp_error}")
-                else:
-                    st.download_button(
-                        "📥 Télécharger EVP mis à jour",
-                        evp_bytes,
-                        f"EVP_mensuelle_mis_a_jour_{safe_filename(periode)}.xlsx",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"evp_download_{safe_filename(periode)}",
-                        on_click="ignore"
-                    )
-
-                    if evp_absents:
-                        st.warning(
-                            "Certains noms n'ont pas été trouvés dans l'EVP : "
-                            + ", ".join(evp_absents)
-                        )
-                    else:
-                        st.success("EVP préparé sans vendeur/directeur manquant.")
-            except Exception as exc:
-                st.error(f"❌ Impossible de préparer l'EVP : {exc}")
-
-        st.divider()
-
-        st.subheader("📦 Exports PDF groupés")
-
-        pdf_cols = {
-            "client": st.session_state.col_client,
-            "doc": st.session_state.col_doc,
-            "date": st.session_state.col_date,
-            "op": st.session_state.col_op,
-            "ca_magasin": st.session_state.col_ca_magasin,
-            "vente": st.session_state.col_vente,
-            "rem": st.session_state.col_rem,
-            "catalogue": st.session_state.col_catalogue,
-            "agence": st.session_state.col_agence,
-            "commerciaux": [
-                st.session_state.col_com1,
-                st.session_state.col_com2,
-                st.session_state.col_com3
-            ],
-        }
-
-        bulk_pdf_items = []
-
-        with st.spinner("Préparation des PDF vendeurs et agences..."):
-            for _, vendeur_row in df_vendeurs.sort_values("Commercial").iterrows():
-                vendeur_nom = vendeur_row.get("Commercial", "")
-                detail_pdf, metrics_pdf = build_detail_vendeur_pdf(
-                    vendeur_nom,
-                    vendeur_row,
-                    st.session_state.df_ok.copy(),
-                    st.session_state.df_c.copy(),
-                    pdf_cols["commerciaux"],
-                    st.session_state.key_cols,
-                    pdf_cols,
-                    periode
-                )
-
-                if detail_pdf is None:
-                    continue
-
-                pdf_bytes = make_simple_pdf(
-                    f"Detail des affaires - {vendeur_nom} - {periode}",
-                    metrics_pdf,
-                    detail_pdf.reset_index(drop=True)
-                )
-                bulk_pdf_items.append((
-                    f"vendeurs/{safe_filename(vendeur_nom)}_{safe_filename(periode)}.pdf",
-                    pdf_bytes
-                ))
-
-            if not df_agences.empty:
-                for _, agence_row in df_agences.sort_values("agence").iterrows():
-                    agence_nom = agence_row.get("agence", "")
-                    detail_pdf, metrics_pdf = build_detail_agence_pdf(
-                        agence_nom,
-                        agence_row,
-                        st.session_state.df_ok.copy(),
-                        st.session_state.df_c.copy(),
-                        st.session_state.key_cols,
-                        pdf_cols,
-                        periode
-                    )
-
-                    if detail_pdf is None:
-                        continue
-
-                    pdf_bytes = make_simple_pdf(
-                        f"Detail des affaires agence - {agence_nom} - {periode}",
-                        metrics_pdf,
-                        detail_pdf.reset_index(drop=True)
-                    )
-                    bulk_pdf_items.append((
-                        f"agences/{safe_filename(agence_nom)}_{safe_filename(periode)}.pdf",
-                        pdf_bytes
-                    ))
-
-        if bulk_pdf_items:
-            zip_bytes = make_pdf_zip(bulk_pdf_items)
-            st.download_button(
-                f"📦 Télécharger tous les PDF ({len(bulk_pdf_items)} fichiers)",
-                zip_bytes,
-                f"exports_pdf_{safe_filename(periode)}.zip",
-                "application/zip",
-                key=f"zip_pdf_all_{safe_filename(periode)}",
-                on_click="ignore"
-            )
-        else:
-            st.info("Aucun PDF à générer pour cette période.")
-
 else:
-    st.info("👉 Charge une période sauvegardée.")
     periodes_main = sorted(list_periodes(), key=periode_sort_key)
 
     if periodes_main:
@@ -4004,16 +4478,70 @@ else:
                 border-color: #D1D5DB;
             }
         }
-        div[data-testid="stSelectbox"] [data-baseweb="select"] {
+        .period-choice-panel {
+            background: #FFFFFF;
+            border: 2px solid #66B32E;
+            border-left: 8px solid #66B32E;
+            border-radius: 14px;
+            padding: 18px 18px 14px 18px;
+            box-shadow: 0 4px 14px rgba(102, 179, 46, 0.14);
+            margin: 18px 0 20px 0;
+        }
+        .period-choice-title {
+            font-size: 22px;
+            font-weight: 800;
+            margin-bottom: 4px;
+        }
+        .period-choice-subtitle {
+            color: #4B5563 !important;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+        .welcome-panel {
+            margin: 22px 0 14px 0;
+            padding: 18px 22px;
+            background: linear-gradient(90deg, #F0F9EB 0%, #FFFFFF 100%);
+            border-radius: 14px;
+            border: 1px solid #B7E2A0;
+        }
+        .welcome-title {
+            font-size: 30px;
+            font-weight: 900;
+            letter-spacing: 0;
+            margin: 0;
+        }
+        .welcome-subtitle {
+            color: #4B5563 !important;
+            font-size: 15px;
+            margin-top: 4px;
+        }
+        div[data-testid="stSelectbox"]:has([data-testid="stWidgetLabel"] label div p) [data-baseweb="select"] {
             animation: periodChoicePulse 2.2s ease-in-out infinite;
             border-radius: 9px;
+            border: 2px solid #66B32E !important;
+            background: #F7FBF3 !important;
         }
         </style>
         """, unsafe_allow_html=True)
+        st.markdown("""
+        <div class="welcome-panel">
+            <div class="welcome-title">Bienvenue</div>
+            <div class="welcome-subtitle">Sélectionne une période pour accéder à tes chiffres EcoHabitat.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="period-choice-panel">
+            <div class="period-choice-title">📅 Choisir une période pour démarrer</div>
+            <div class="period-choice-subtitle">Sélectionne une période sauvegardée dans le menu ci-dessous.</div>
+        </div>
+        """, unsafe_allow_html=True)
+
         periode_empty_select = st.selectbox(
-            "Choisir une période sauvegardée",
+            "Période sauvegardée",
             [""] + periodes_main,
-            key="periode_empty_select"
+            key="periode_empty_select",
+            help="Choisis une période pour charger le dashboard."
         )
 
         if periode_empty_select:
@@ -4026,13 +4554,5 @@ else:
 
     if role == "admin":
         st.info("Ou charge les fichiers CONFIRM / BONLIVR puis clique sur « Lancer le traitement ».")
-
-        st.divider()
-
-        tabs_empty = st.tabs(["📆 Annuel", "⚙️ Utilisateurs"])
-        afficher_annuel(tabs_empty[0])
-
-        with tabs_empty[1]:
-            afficher_admin_users()
 
 st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence • Design EcoHabitat • Analyse annuelle M-2")
