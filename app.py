@@ -54,6 +54,22 @@ html, body, [class*="css"] {
     color: #1F2933 !important;
 }
 
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebar"] button[aria-label="Close sidebar"],
+[data-testid="stSidebar"] button[title="Close sidebar"] {
+    display: inline-flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    position: fixed !important;
+    top: 14px !important;
+    left: 252px !important;
+    z-index: 999999 !important;
+    background: rgba(255, 255, 255, 0.92) !important;
+    border-radius: 999px !important;
+    box-shadow: 0 4px 12px rgba(31, 41, 51, 0.12) !important;
+}
+
 /* TEXTES */
 h1, h2, h3, h4, h5, h6,
 p, label {
@@ -2868,43 +2884,21 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                 ],
             }
 
-            bulk_pdf_items = []
+            bulk_zip_key = f"sidebar_bulk_pdf_zip_{safe_filename(periode_tools)}"
+            bulk_count_key = f"sidebar_bulk_pdf_count_{safe_filename(periode_tools)}"
 
-            with st.spinner("Préparation PDF..."):
-                for _, vendeur_row in df_vendeurs_tools.sort_values("Commercial").iterrows():
-                    vendeur_nom = vendeur_row.get("Commercial", "")
-                    detail_pdf, metrics_pdf = build_detail_vendeur_pdf(
-                        vendeur_nom,
-                        vendeur_row,
-                        st.session_state.df_ok.copy(),
-                        st.session_state.df_c.copy(),
-                        pdf_cols["commerciaux"],
-                        st.session_state.key_cols,
-                        pdf_cols,
-                        periode_tools
-                    )
+            if st.button("📦 Préparer les PDF groupés", key=f"prepare_sidebar_zip_pdf_all_{safe_filename(periode_tools)}"):
+                bulk_pdf_items = []
 
-                    if detail_pdf is None:
-                        continue
-
-                    pdf_bytes = make_simple_pdf(
-                        f"Detail des affaires - {vendeur_nom} - {periode_tools}",
-                        metrics_pdf,
-                        detail_pdf.reset_index(drop=True)
-                    )
-                    bulk_pdf_items.append((
-                        f"vendeurs/{safe_filename(vendeur_nom)}_{safe_filename(periode_tools)}.pdf",
-                        pdf_bytes
-                    ))
-
-                if not df_agences_tools.empty:
-                    for _, agence_row in df_agences_tools.sort_values("agence").iterrows():
-                        agence_nom = agence_row.get("agence", "")
-                        detail_pdf, metrics_pdf = build_detail_agence_pdf(
-                            agence_nom,
-                            agence_row,
+                with st.spinner("Préparation PDF..."):
+                    for _, vendeur_row in df_vendeurs_tools.sort_values("Commercial").iterrows():
+                        vendeur_nom = vendeur_row.get("Commercial", "")
+                        detail_pdf, metrics_pdf = build_detail_vendeur_pdf(
+                            vendeur_nom,
+                            vendeur_row,
                             st.session_state.df_ok.copy(),
                             st.session_state.df_c.copy(),
+                            pdf_cols["commerciaux"],
                             st.session_state.key_cols,
                             pdf_cols,
                             periode_tools
@@ -2914,27 +2908,60 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                             continue
 
                         pdf_bytes = make_simple_pdf(
-                            f"Detail des affaires agence - {agence_nom} - {periode_tools}",
+                            f"Detail des affaires - {vendeur_nom} - {periode_tools}",
                             metrics_pdf,
                             detail_pdf.reset_index(drop=True)
                         )
                         bulk_pdf_items.append((
-                            f"agences/{safe_filename(agence_nom)}_{safe_filename(periode_tools)}.pdf",
+                            f"vendeurs/{safe_filename(vendeur_nom)}_{safe_filename(periode_tools)}.pdf",
                             pdf_bytes
                         ))
 
-            if bulk_pdf_items:
-                zip_bytes = make_pdf_zip(bulk_pdf_items)
+                    if not df_agences_tools.empty:
+                        for _, agence_row in df_agences_tools.sort_values("agence").iterrows():
+                            agence_nom = agence_row.get("agence", "")
+                            detail_pdf, metrics_pdf = build_detail_agence_pdf(
+                                agence_nom,
+                                agence_row,
+                                st.session_state.df_ok.copy(),
+                                st.session_state.df_c.copy(),
+                                st.session_state.key_cols,
+                                pdf_cols,
+                                periode_tools
+                            )
+
+                            if detail_pdf is None:
+                                continue
+
+                            pdf_bytes = make_simple_pdf(
+                                f"Detail des affaires agence - {agence_nom} - {periode_tools}",
+                                metrics_pdf,
+                                detail_pdf.reset_index(drop=True)
+                            )
+                            bulk_pdf_items.append((
+                                f"agences/{safe_filename(agence_nom)}_{safe_filename(periode_tools)}.pdf",
+                                pdf_bytes
+                            ))
+
+                if bulk_pdf_items:
+                    st.session_state[bulk_zip_key] = make_pdf_zip(bulk_pdf_items)
+                    st.session_state[bulk_count_key] = len(bulk_pdf_items)
+                else:
+                    st.session_state.pop(bulk_zip_key, None)
+                    st.session_state.pop(bulk_count_key, None)
+                    st.info("Aucun PDF à générer.")
+
+            if bulk_zip_key in st.session_state:
                 st.download_button(
-                    f"📦 Télécharger PDF ({len(bulk_pdf_items)})",
-                    zip_bytes,
+                    f"📥 Télécharger PDF ({st.session_state.get(bulk_count_key, 0)})",
+                    st.session_state[bulk_zip_key],
                     f"exports_pdf_{safe_filename(periode_tools)}.zip",
                     "application/zip",
                     key=f"sidebar_zip_pdf_all_{safe_filename(periode_tools)}",
                     on_click="ignore"
                 )
             else:
-                st.info("Aucun PDF à générer.")
+                st.caption("Le ZIP sera généré uniquement à la demande.")
         else:
             st.caption("Charge une période pour activer les exports.")
 
@@ -4143,35 +4170,43 @@ if st.session_state.get("df_vendeurs") is not None:
                     vendeur_remise_label: f"{to_float(data.get(vendeur_remise_col, 0)):,.2f} %",
                     vendeur_bonus_malus_label: f"{to_float(data.get(vendeur_bonus_malus_col, 0)):,.2f} EUR",
                 }
-                pdf_bytes = make_simple_pdf(
-                    f"Detail des affaires - {vendeur} - {periode}",
-                    pdf_metrics,
-                    detail_affichage.reset_index(drop=True)
-                )
                 pdf_filename = f"detail_vendeur_{safe_filename(vendeur)}_{safe_filename(periode)}.pdf"
+                pdf_cache_key = f"pdf_cache_vendeur_{safe_filename(vendeur)}_{safe_filename(periode)}"
                 pdf_container = st.container()
-                if is_render_env():
-                    pdf_container.download_button(
-                        "📄 Télécharger PDF vendeur",
-                        pdf_bytes,
-                        pdf_filename,
-                        "application/pdf",
-                        key=f"pdf_vendeur_{safe_filename(vendeur)}",
-                        on_click="ignore"
+
+                if pdf_container.button("📄 Préparer PDF vendeur", key=f"prepare_pdf_vendeur_{safe_filename(vendeur)}"):
+                    st.session_state[pdf_cache_key] = make_simple_pdf(
+                        f"Detail des affaires - {vendeur} - {periode}",
+                        pdf_metrics,
+                        detail_affichage.reset_index(drop=True)
                     )
+
+                if pdf_cache_key in st.session_state:
+                    pdf_bytes = st.session_state[pdf_cache_key]
+                    if is_render_env():
+                        pdf_container.download_button(
+                            "📥 Télécharger PDF vendeur",
+                            pdf_bytes,
+                            pdf_filename,
+                            "application/pdf",
+                            key=f"pdf_vendeur_{safe_filename(vendeur)}",
+                            on_click="ignore"
+                        )
+                    else:
+                        pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
+                        pdf_col1.download_button(
+                            "📥 Télécharger PDF vendeur",
+                            pdf_bytes,
+                            pdf_filename,
+                            "application/pdf",
+                            key=f"pdf_vendeur_{safe_filename(vendeur)}",
+                            on_click="ignore"
+                        )
+                        if pdf_col2.button("💾 Générer PDF vendeur", key=f"save_pdf_vendeur_{safe_filename(vendeur)}"):
+                            pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
+                            st.success(f"PDF généré : {pdf_path}")
                 else:
-                    pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
-                    pdf_col1.download_button(
-                        "📄 Télécharger PDF vendeur",
-                        pdf_bytes,
-                        pdf_filename,
-                        "application/pdf",
-                        key=f"pdf_vendeur_{safe_filename(vendeur)}",
-                        on_click="ignore"
-                    )
-                    if pdf_col2.button("💾 Générer PDF vendeur", key=f"save_pdf_vendeur_{safe_filename(vendeur)}"):
-                        pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
-                        st.success(f"PDF généré : {pdf_path}")
+                    pdf_container.caption("Le PDF sera généré uniquement à la demande.")
 
                 def color_bonus_malus(val):
                     try:
@@ -4357,35 +4392,43 @@ if st.session_state.get("df_vendeurs") is not None:
                     "Bonus / Malus OK": f"{to_float(data.get('bonus_malus_ok', 0)):,.2f} EUR",
                     "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
                 }
-                pdf_bytes = make_simple_pdf(
-                    f"Detail des affaires agence - {agence} - {periode}",
-                    pdf_metrics,
-                    detail_affichage.reset_index(drop=True)
-                )
                 pdf_filename = f"detail_agence_{safe_filename(agence)}_{safe_filename(periode)}.pdf"
+                pdf_cache_key = f"pdf_cache_agence_{safe_filename(agence)}_{safe_filename(periode)}"
                 pdf_container = st.container()
-                if is_render_env():
-                    pdf_container.download_button(
-                        "📄 Télécharger PDF agence",
-                        pdf_bytes,
-                        pdf_filename,
-                        "application/pdf",
-                        key=f"pdf_agence_{safe_filename(agence)}",
-                        on_click="ignore"
+
+                if pdf_container.button("📄 Préparer PDF agence", key=f"prepare_pdf_agence_{safe_filename(agence)}"):
+                    st.session_state[pdf_cache_key] = make_simple_pdf(
+                        f"Detail des affaires agence - {agence} - {periode}",
+                        pdf_metrics,
+                        detail_affichage.reset_index(drop=True)
                     )
+
+                if pdf_cache_key in st.session_state:
+                    pdf_bytes = st.session_state[pdf_cache_key]
+                    if is_render_env():
+                        pdf_container.download_button(
+                            "📥 Télécharger PDF agence",
+                            pdf_bytes,
+                            pdf_filename,
+                            "application/pdf",
+                            key=f"pdf_agence_{safe_filename(agence)}",
+                            on_click="ignore"
+                        )
+                    else:
+                        pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
+                        pdf_col1.download_button(
+                            "📥 Télécharger PDF agence",
+                            pdf_bytes,
+                            pdf_filename,
+                            "application/pdf",
+                            key=f"pdf_agence_{safe_filename(agence)}",
+                            on_click="ignore"
+                        )
+                        if pdf_col2.button("💾 Générer PDF agence", key=f"save_pdf_agence_{safe_filename(agence)}"):
+                            pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
+                            st.success(f"PDF généré : {pdf_path}")
                 else:
-                    pdf_col1, pdf_col2 = pdf_container.columns([1, 1])
-                    pdf_col1.download_button(
-                        "📄 Télécharger PDF agence",
-                        pdf_bytes,
-                        pdf_filename,
-                        "application/pdf",
-                        key=f"pdf_agence_{safe_filename(agence)}",
-                        on_click="ignore"
-                    )
-                    if pdf_col2.button("💾 Générer PDF agence", key=f"save_pdf_agence_{safe_filename(agence)}"):
-                        pdf_path = save_pdf_export(pdf_bytes, pdf_filename)
-                        st.success(f"PDF généré : {pdf_path}")
+                    pdf_container.caption("Le PDF sera généré uniquement à la demande.")
 
                 render_table_with_status_tooltips(
                     detail_affichage,
