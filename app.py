@@ -669,26 +669,27 @@ def build_attente_internal_mail_body(df, periode, col_client, col_doc, col_date,
     lines = [
         "Bonjour,",
         "",
-        f"Point hebdomadaire des dossiers en attente - {periode}",
+        f"⏳ Point hebdomadaire des dossiers en attente - {periode}",
         "",
-        f"Nombre de dossiers : {len(df)}",
+        "📌 Résumé",
+        f"- Nombre de dossiers : {len(df)}",
     ]
 
     if col_ca_magasin and col_ca_magasin in df.columns:
         total = pd.to_numeric(df[col_ca_magasin], errors="coerce").fillna(0).sum()
-        lines.append(f"CA global en attente : {total:,.2f} EUR")
+        lines.append(f"- CA global en attente : {total:,.2f} EUR")
 
     lines.append("")
     lines.append(
-        "Merci à l'ADV de compléter les motifs manquants et de mettre à jour les motifs déjà renseignés "
+        "📝 Merci au secrétariat de compléter les motifs manquants et de mettre à jour les motifs déjà renseignés "
         "si la situation du dossier a évolué."
     )
-    lines.append("Lien Manager pour compléter les motifs : https://manager.ecohabitat76.fr/")
+    lines.append("🔗 Lien Manager pour compléter les motifs : https://manager.ecohabitat76.fr/")
     lines.append(
-        "L'objectif est que chaque dossier en attente indique clairement l'élément bloquant et l'action attendue."
+        "🎯 Objectif : chaque dossier en attente doit indiquer clairement l'élément bloquant et l'action attendue."
     )
     lines.append("")
-    lines.append("Dossiers à suivre :")
+    lines.append("📂 Dossiers à suivre")
 
     if df.empty:
         lines.append("- Aucun dossier en attente sur la sélection.")
@@ -702,7 +703,7 @@ def build_attente_internal_mail_body(df, periode, col_client, col_doc, col_date,
 
     for agence, group in grouped_items:
         lines.append("")
-        lines.append(f"Agence : {agence or 'Non renseignée'}")
+        lines.append(f"🏢 Agence : {agence or 'Non renseignée'}")
         for _, row in group.iterrows():
             client = clean_visible(row.get(col_client, "")) if col_client else "Dossier"
             doc = clean_visible(row.get(col_doc, "")) if col_doc else ""
@@ -715,19 +716,19 @@ def build_attente_internal_mail_body(df, periode, col_client, col_doc, col_date,
             motif = clean_visible(row.get("Motif d'attente", "")) or "Motif à compléter"
             detail = clean_visible(row.get("Détail motif", "")) or "Élément manquant à préciser"
 
-            line = f"- {client}"
+            line = f"• {client}"
             if doc:
                 line += f" | Doc {doc}"
             if date_doc:
                 line += f" | {date_doc}"
             if commerciaux:
                 line += f" | {commerciaux}"
-            line += f" | Motif : {motif} | À obtenir : {detail}"
+            line += f" | ⚠️ Motif : {motif} | 🔎 À obtenir : {detail}"
             lines.append(line)
 
     lines.extend([
         "",
-        "Merci également de mettre à jour les dossiers dès réception des éléments afin de permettre leur passage en statut actif.",
+        "🙏 Merci à chacun de faire remonter les informations nécessaires afin de débloquer le statut de vos dossiers.",
         "",
         "Cordialement,"
     ])
