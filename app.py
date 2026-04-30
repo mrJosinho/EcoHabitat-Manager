@@ -225,6 +225,14 @@ button[data-baseweb="tab"][aria-selected="true"] {
     background: #F0F9EB;
 }
 
+.app-footer {
+    margin-top: 28px;
+    padding: 14px 0 6px 0;
+    color: #8A939B !important;
+    font-size: 12px;
+    text-align: center;
+}
+
 /* CORRECTION BOUTONS SIDEBAR */
 [data-testid="stSidebar"] .stButton > button {
     background: #FFFFFF !important;
@@ -409,6 +417,27 @@ def save_users(users):
         json.dump(users, f, indent=4, ensure_ascii=False)
 
 
+@st.dialog("Nouveauté directeur d'agence")
+def show_directeur_agence_update_dialog(username):
+    st.markdown(
+        """
+        Une nouvelle vue est disponible dans ton espace :
+
+        **👥 Vendeurs agence**
+
+        Elle permet de consulter les chiffres des vendeurs affectés à ton agence,
+        en complément de tes propres chiffres et de la vue agence.
+        """
+    )
+    if st.button("J'ai compris", type="primary", key="confirm_directeur_agence_update"):
+        users = load_users()
+        if username in users:
+            users[username]["seen_vendeurs_agence_update"] = True
+            save_users(users)
+            st.session_state.user = users[username]
+        st.rerun()
+
+
 def load_settings():
     if SETTINGS_FILE.exists():
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -423,6 +452,22 @@ def load_settings():
 def save_settings(settings):
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=4, ensure_ascii=False)
+
+
+def get_commercial_agence_assignments(settings=None):
+    settings = settings if isinstance(settings, dict) else load_settings()
+    assignments = settings.get("commercial_agence_assignments", {})
+    return assignments if isinstance(assignments, dict) else {}
+
+
+def get_assigned_commercial_keys_for_agence(agence, settings=None):
+    agence_key = normalize_key(agence)
+    assignments = get_commercial_agence_assignments(settings)
+    return {
+        normalize_key(commercial)
+        for commercial, assigned_agence in assignments.items()
+        if normalize_key(assigned_agence) == agence_key
+    }
 
 
 # ====================== MOTIFS D'ATTENTE ======================
@@ -709,6 +754,18 @@ def clean_visible(s):
     if pd.isna(s):
         return ""
     return " ".join(str(s).replace(chr(160), " ").split()).strip()
+
+
+def keep_best_display_name(existing, candidate):
+    existing = clean_visible(existing)
+    candidate = clean_visible(candidate)
+    if not existing:
+        return candidate
+    if not candidate:
+        return existing
+    if existing == existing.upper() and candidate != candidate.upper():
+        return candidate
+    return existing
 
 
 def to_float(value, default=0.0):
@@ -1148,6 +1205,16 @@ def recompute_df_vendeurs_indicators(
             remise_values.get("global_rem_hors_op", 0.0) / global_catalogue_hors_op * 100,
             2
         ) if global_catalogue_hors_op > 0 else 0.0
+
+        if not is_responsable_agence(row.get("Commercial")):
+            base_comm, points, comm_def, euro = calculate_commission(
+                ca_ok,
+                to_float(df_vendeurs.at[idx, "remise_hors_opc_pct"])
+            )
+            df_vendeurs.at[idx, "base_commission_pct"] = base_comm
+            df_vendeurs.at[idx, "points_perdus"] = points
+            df_vendeurs.at[idx, "commission_pct"] = comm_def
+            df_vendeurs.at[idx, "commission_eur"] = euro
 
     return df_vendeurs
 
@@ -2340,7 +2407,15 @@ if not st.session_state.logged_in:
 user = st.session_state.user
 role = user["role"]
 
-if role in ["admin", "vendeur", "directeur_agence"] and not st.session_state.get(f"sidebar_auto_collapsed_{role}"):
+if (
+    role == "directeur_agence"
+    and not user.get("seen_vendeurs_agence_update")
+    and not st.session_state.get("directeur_agence_update_dialog_opened")
+):
+    st.session_state.directeur_agence_update_dialog_opened = True
+    show_directeur_agence_update_dialog(st.session_state.get("username", ""))
+
+if role in ["admin", "vendeur", "directeur_agence", "secretaire"] and not st.session_state.get(f"sidebar_auto_collapsed_{role}"):
     components.html(
         """
         <script>
@@ -2391,6 +2466,8 @@ if st.sidebar.button("🚪 Déconnexion"):
         "sidebar_auto_collapsed_admin",
         "sidebar_auto_collapsed_vendeur",
         "sidebar_auto_collapsed_directeur_agence",
+        "sidebar_auto_collapsed_secretaire",
+        "directeur_agence_update_dialog_opened",
     ]:
         if k in st.session_state:
             del st.session_state[k]
@@ -2986,6 +3063,7 @@ def afficher_admin_users():
     st.subheader("⚙️ Gestion des utilisateurs")
 
     users = load_users()
+    settings = load_settings()
 
     st.write("### 👥 Utilisateurs existants")
 
@@ -3016,7 +3094,7 @@ def afficher_admin_users():
         new_password = st.text_input("Mot de passe", type="password", key="new_password")
 
     with col2:
-        new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence"], key="new_role")
+        new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence", "secretaire"], key="new_role")
         new_nom = st.text_input("Nom vendeur / utilisateur", key="new_nom").upper().strip()
         new_agence = st.text_input("Agence si directeur", key="new_agence").upper().strip()
         new_totp_enabled = st.checkbox("Activer Authenticator (2FA)", key="new_totp_enabled")
@@ -3060,7 +3138,7 @@ def afficher_admin_users():
                 help="Laisse vide pour conserver le mot de passe actuel."
             )
 
-            role_options = ["admin", "vendeur", "directeur_agence"]
+            role_options = ["admin", "vendeur", "directeur_agence", "secretaire"]
             current_role = u.get("role", "vendeur")
             role_index = role_options.index(current_role) if current_role in role_options else 1
 
@@ -3095,7 +3173,8 @@ def afficher_admin_users():
                     "agence": edit_agence if edit_role == "directeur_agence" else None,
                     "totp_enabled": bool(edit_totp_enabled),
                     "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
-                    "totp_confirmed": bool(u.get("totp_confirmed")) if edit_totp_enabled else False
+                    "totp_confirmed": bool(u.get("totp_confirmed")) if edit_totp_enabled else False,
+                    "seen_vendeurs_agence_update": bool(u.get("seen_vendeurs_agence_update"))
                 }
 
                 if edit_password:
@@ -3117,6 +3196,114 @@ def afficher_admin_users():
 
                 st.success("Utilisateur modifié ✅")
                 st.rerun()
+
+    st.divider()
+
+    st.write("### 🏢 Affectation commerciaux / agences")
+
+    assignments = get_commercial_agence_assignments(settings)
+
+    commerciaux_by_key = {}
+    def add_commercial_option(value):
+        value = clean_visible(value)
+        key = normalize_key(value)
+        if key:
+            commerciaux_by_key[key] = keep_best_display_name(commerciaux_by_key.get(key, ""), value)
+
+    if st.session_state.get("df_vendeurs") is not None and not st.session_state.df_vendeurs.empty:
+        for v in st.session_state.df_vendeurs.get("Commercial", pd.Series(dtype=str)).dropna().tolist():
+            add_commercial_option(v)
+    for u in users.values():
+        if u.get("role") in ["vendeur", "directeur_agence"]:
+            add_commercial_option(u.get("nom", ""))
+    for k in assignments.keys():
+        add_commercial_option(k)
+
+    agences_by_key = {}
+    def add_agence_option(value):
+        value = clean_visible(value)
+        key = normalize_key(value)
+        if key:
+            agences_by_key[key] = keep_best_display_name(agences_by_key.get(key, ""), value)
+
+    if st.session_state.get("df_agences") is not None and not st.session_state.df_agences.empty:
+        for a in st.session_state.df_agences.get("agence", pd.Series(dtype=str)).dropna().tolist():
+            add_agence_option(a)
+    for u in users.values():
+        add_agence_option(u.get("agence", ""))
+    for a in assignments.values():
+        add_agence_option(a)
+
+    assigned_commercial_keys = {normalize_key(commercial) for commercial in assignments.keys()}
+    commerciaux_options = sorted(
+        [
+            commercial
+            for commercial in commerciaux_by_key.values()
+            if normalize_key(commercial) not in assigned_commercial_keys
+        ],
+        key=normalize_key
+    )
+    agences_options = sorted(agences_by_key.values(), key=normalize_key)
+
+    if assignments:
+        df_assignments = pd.DataFrame(
+            [
+                {"Commercial": commercial, "Agence affectée": agence}
+                for commercial, agence in sorted(assignments.items(), key=lambda item: normalize_key(item[0]))
+            ]
+        )
+        st.dataframe(df_assignments, use_container_width=True)
+    else:
+        st.info("Aucune affectation enregistrée. Les directeurs ne verront que leur propre compte tant qu'une affectation n'est pas créée.")
+
+    if commerciaux_options and agences_options:
+        col_aff1, col_aff2 = st.columns(2)
+        with col_aff1:
+            assignment_commercial = st.selectbox(
+                "Commercial à affecter",
+                commerciaux_options,
+                key="assignment_commercial"
+            )
+        with col_aff2:
+            assignment_commercial_key = normalize_key(assignment_commercial)
+            current_assignment = next(
+                (agence for commercial, agence in assignments.items() if normalize_key(commercial) == assignment_commercial_key),
+                ""
+            )
+            assignment_index = agences_options.index(current_assignment) if current_assignment in agences_options else 0
+            assignment_agence = st.selectbox(
+                "Agence",
+                agences_options,
+                index=assignment_index,
+                key="assignment_agence"
+            )
+
+        if st.button("Enregistrer affectation commercial", key="save_commercial_assignment"):
+            for existing_commercial in list(assignments.keys()):
+                if normalize_key(existing_commercial) == normalize_key(assignment_commercial):
+                    assignments.pop(existing_commercial, None)
+            assignments[assignment_commercial] = assignment_agence
+            settings["commercial_agence_assignments"] = assignments
+            save_settings(settings)
+            st.success("Affectation enregistrée ✅")
+            st.rerun()
+
+        assigned_commercials = sorted(assignments.keys(), key=normalize_key)
+        if assigned_commercials:
+            assignment_delete = st.selectbox(
+                "Affectation à retirer",
+                assigned_commercials,
+                format_func=lambda commercial: f"{commercial} → {assignments.get(commercial, '')}",
+                key="assignment_delete"
+            )
+            if st.button("Retirer cette affectation", key="delete_commercial_assignment"):
+                assignments.pop(assignment_delete, None)
+                settings["commercial_agence_assignments"] = assignments
+                save_settings(settings)
+                st.success("Affectation retirée ✅")
+                st.rerun()
+    else:
+        st.caption("Charge une période ou crée des utilisateurs pour disposer des listes de commerciaux et d'agences.")
 
     st.divider()
 
@@ -3600,17 +3787,18 @@ def afficher_dossiers_en_attente(tab):
                         st.success("Motif d'attente enregistré ✅")
                         st.rerun()
 
-                mail_subject = f"Éléments manquants dossier {clean_visible(selected_row.get(col_client, ''))}"
-                mail_body = (
-                    "Bonjour,\n\n"
-                    "Nous revenons vers vous concernant votre dossier.\n\n"
-                    f"Motif d'attente : {clean_visible(motif_current) or '[à compléter]'}\n"
-                    f"Élément attendu : {clean_visible(selected_record.get('detail', '')) or '[à compléter]'}\n\n"
-                    "Merci de nous transmettre les éléments nécessaires afin que nous puissions faire avancer le dossier.\n\n"
-                    "Cordialement,\nEcoHabitat"
-                )
-                mailto_url = f"mailto:?subject={quote(mail_subject)}&body={quote(mail_body)}"
-                st.link_button("📧 Préparer un mail de relance", mailto_url)
+                if role != "secretaire":
+                    mail_subject = f"Éléments manquants dossier {clean_visible(selected_row.get(col_client, ''))}"
+                    mail_body = (
+                        "Bonjour,\n\n"
+                        "Nous revenons vers vous concernant votre dossier.\n\n"
+                        f"Motif d'attente : {clean_visible(motif_current) or '[à compléter]'}\n"
+                        f"Élément attendu : {clean_visible(selected_record.get('detail', '')) or '[à compléter]'}\n\n"
+                        "Merci de nous transmettre les éléments nécessaires afin que nous puissions faire avancer le dossier.\n\n"
+                        "Cordialement,\nEcoHabitat"
+                    )
+                    mailto_url = f"mailto:?subject={quote(mail_subject)}&body={quote(mail_body)}"
+                    st.link_button("📧 Préparer un mail de relance", mailto_url)
 
         cols_show = [
             col_client,
@@ -3661,7 +3849,7 @@ def afficher_dossiers_en_attente(tab):
             selection_mode="single-row"
         )
 
-        if not filtered.empty:
+        if role != "secretaire" and not filtered.empty:
             with st.expander("📧 Mail interne hebdomadaire", expanded=False):
                 settings = load_settings()
                 internal_recipients = st.text_input(
@@ -3801,8 +3989,41 @@ if st.session_state.get("df_vendeurs") is not None:
         df_directeurs = pd.DataFrame()
 
     elif role == "directeur_agence":
+        directeur_agence = user.get("agence")
+        assigned_vendor_keys = get_assigned_commercial_keys_for_agence(directeur_agence)
+        directeur_agence_vendeurs = set(assigned_vendor_keys)
+        directeur_agence_vendeurs.add(normalize_key(user.get("nom", "")))
+        colonnes_commerciaux_directeur = [
+            st.session_state.col_com1,
+            st.session_state.col_com2,
+            st.session_state.col_com3
+        ]
+        df_ok_directeur_agence = st.session_state.df_ok[
+            agence_mask(st.session_state.df_ok, directeur_agence, st.session_state.col_agence)
+        ].copy()
+        df_c_directeur_agence = st.session_state.df_c[
+            agence_mask(st.session_state.df_c, directeur_agence, st.session_state.col_agence)
+        ].copy()
+
         df_vendeurs = df_vendeurs_all[
-            df_vendeurs_all["Commercial"].apply(normalize_key) == normalize_key(user["nom"])
+            df_vendeurs_all["Commercial"].apply(normalize_key).isin(directeur_agence_vendeurs)
+        ].copy()
+        df_vendeurs = recompute_df_vendeurs_indicators(
+            df_vendeurs,
+            df_ok_directeur_agence,
+            df_c_directeur_agence,
+            st.session_state.col_vente,
+            st.session_state.col_catalogue,
+            st.session_state.col_rem,
+            st.session_state.col_op,
+            colonnes_commerciaux_directeur,
+            st.session_state.key_cols,
+            st.session_state.col_client,
+            st.session_state.col_agence,
+            st.session_state.col_ca_magasin
+        )
+        df_vendeurs_agence = df_vendeurs[
+            df_vendeurs["Commercial"].apply(normalize_key).isin(assigned_vendor_keys)
         ].copy()
 
         df_agences = df_agences_all[
@@ -3864,6 +4085,7 @@ if st.session_state.get("df_vendeurs") is not None:
         pages = [
             "👤 Mes chiffres",
             "📆 Annuel",
+            "👥 Vendeurs agence",
             "🏢 Mon agence",
             "👔 Commission agence"
         ]
@@ -3876,6 +4098,20 @@ if st.session_state.get("df_vendeurs") is not None:
             width="stretch"
         )
         active_page = active_page or st.session_state.get("active_page_directeur") or pages[0]
+
+    elif role == "secretaire":
+        pages = [
+            "⏳ En attente"
+        ]
+        active_page = st.pills(
+            "Navigation",
+            pages,
+            default=pages[0],
+            label_visibility="collapsed",
+            key="active_page_secretaire",
+            width="stretch"
+        )
+        active_page = active_page or st.session_state.get("active_page_secretaire") or pages[0]
 
     else:
         pages = [
@@ -3894,16 +4130,18 @@ if st.session_state.get("df_vendeurs") is not None:
 
     # ====================== FONCTIONS AFFICHAGE ======================
 
-    def afficher_vendeur(tab, vendeur_forced=None):
+    def afficher_vendeur(tab, vendeur_forced=None, agence_forced=None, vendeurs_source=None):
         with tab:
-            if df_vendeurs.empty:
+            source_vendeurs = vendeurs_source if vendeurs_source is not None else df_vendeurs
+
+            if source_vendeurs.empty:
                 st.info("Aucune donnée vendeur disponible pour ce compte.")
                 return
 
             if vendeur_forced:
                 vendeur = vendeur_forced
             else:
-                vendeurs_options = sorted(df_vendeurs["Commercial"])
+                vendeurs_options = sorted(source_vendeurs["Commercial"])
                 vendeur_precedent = st.session_state.get("vendeur_select")
                 vendeur_index = vendeurs_options.index(vendeur_precedent) if vendeur_precedent in vendeurs_options else 0
                 vendeur = st.selectbox(
@@ -3913,7 +4151,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     key="vendeur_select"
                 )
 
-            data = df_vendeurs[df_vendeurs["Commercial"].apply(normalize_key) == normalize_key(vendeur)]
+            data = source_vendeurs[source_vendeurs["Commercial"].apply(normalize_key) == normalize_key(vendeur)]
 
             if data.empty:
                 st.info("Aucune donnée trouvée pour ce vendeur.")
@@ -4026,6 +4264,10 @@ if st.session_state.get("df_vendeurs") is not None:
             col_vente = st.session_state.col_vente
             col_ca_magasin = st.session_state.col_ca_magasin
             col_catalogue = st.session_state.col_catalogue
+
+            if agence_forced:
+                df_ok = df_ok[agence_mask(df_ok, agence_forced, col_agence)].copy()
+                df_c = df_c[agence_mask(df_c, agence_forced, col_agence)].copy()
 
             ok_detail = df_ok[vendeur_mask(df_ok, vendeur, colonnes_commerciaux)].copy()
             attente_detail = df_c[vendeur_mask(df_c, vendeur, colonnes_commerciaux)].copy()
@@ -4585,9 +4827,14 @@ if st.session_state.get("df_vendeurs") is not None:
 
     elif role == "directeur_agence":
         if active_page == "👤 Mes chiffres":
-            afficher_vendeur(st.container(), vendeur_forced=user["nom"])
+            afficher_vendeur(st.container(), vendeur_forced=user["nom"], agence_forced=user["agence"])
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
+        if active_page == "👥 Vendeurs agence":
+            if df_vendeurs_agence.empty:
+                st.info("Aucun vendeur n'est affecté à ton agence. Un administrateur doit renseigner les affectations dans ⚙️ Utilisateurs.")
+            else:
+                afficher_vendeur(st.container(), agence_forced=user["agence"], vendeurs_source=df_vendeurs_agence)
         if active_page == "🏢 Mon agence":
             afficher_agence(st.container(), agence_forced=user["agence"])
 
@@ -4602,6 +4849,9 @@ if st.session_state.get("df_vendeurs") is not None:
             afficher_vendeur(st.container(), vendeur_forced=user["nom"])
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
+
+    elif role == "secretaire":
+        afficher_dossiers_en_attente(st.container())
 
 else:
     periodes_main = sorted(list_periodes(), key=periode_sort_key)
@@ -4700,4 +4950,7 @@ else:
     if role == "admin":
         st.info("Ou charge les fichiers CONFIRM / BONLIVR puis clique sur « Lancer le traitement ».")
 
-st.caption("✅ Version avec login + gestion utilisateurs • Admin / Vendeur / Directeur agence • Design EcoHabitat • Analyse annuelle M-2")
+st.markdown(
+    '<div class="app-footer">Créé par LUCCHINI Joseph</div>',
+    unsafe_allow_html=True
+)
