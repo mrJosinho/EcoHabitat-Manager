@@ -3994,35 +3994,10 @@ if st.session_state.get("df_vendeurs") is not None:
         assigned_vendor_keys = get_assigned_commercial_keys_for_agence(directeur_agence)
         directeur_agence_vendeurs = set(assigned_vendor_keys)
         directeur_agence_vendeurs.add(normalize_key(user.get("nom", "")))
-        colonnes_commerciaux_directeur = [
-            st.session_state.col_com1,
-            st.session_state.col_com2,
-            st.session_state.col_com3
-        ]
-        df_ok_directeur_agence = st.session_state.df_ok[
-            agence_mask(st.session_state.df_ok, directeur_agence, st.session_state.col_agence)
-        ].copy()
-        df_c_directeur_agence = st.session_state.df_c[
-            agence_mask(st.session_state.df_c, directeur_agence, st.session_state.col_agence)
-        ].copy()
 
         df_vendeurs = df_vendeurs_all[
             df_vendeurs_all["Commercial"].apply(normalize_key).isin(directeur_agence_vendeurs)
         ].copy()
-        df_vendeurs = recompute_df_vendeurs_indicators(
-            df_vendeurs,
-            df_ok_directeur_agence,
-            df_c_directeur_agence,
-            st.session_state.col_vente,
-            st.session_state.col_catalogue,
-            st.session_state.col_rem,
-            st.session_state.col_op,
-            colonnes_commerciaux_directeur,
-            st.session_state.key_cols,
-            st.session_state.col_client,
-            st.session_state.col_agence,
-            st.session_state.col_ca_magasin
-        )
         df_vendeurs_agence = df_vendeurs[
             df_vendeurs["Commercial"].apply(normalize_key).isin(assigned_vendor_keys)
         ].copy()
@@ -4828,14 +4803,14 @@ if st.session_state.get("df_vendeurs") is not None:
 
     elif role == "directeur_agence":
         if active_page == "👤 Mes chiffres":
-            afficher_vendeur(st.container(), vendeur_forced=user["nom"], agence_forced=user["agence"])
+            afficher_vendeur(st.container(), vendeur_forced=user["nom"])
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
         if active_page == "👥 Vendeurs agence":
             if df_vendeurs_agence.empty:
                 st.info("Aucun vendeur n'est affecté à ton agence. Un administrateur doit renseigner les affectations dans ⚙️ Utilisateurs.")
             else:
-                afficher_vendeur(st.container(), agence_forced=user["agence"], vendeurs_source=df_vendeurs_agence)
+                afficher_vendeur(st.container(), vendeurs_source=df_vendeurs_agence)
         if active_page == "🏢 Mon agence":
             afficher_agence(st.container(), agence_forced=user["agence"])
 
