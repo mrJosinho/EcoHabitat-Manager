@@ -454,6 +454,69 @@ def save_settings(settings):
         json.dump(settings, f, indent=4, ensure_ascii=False)
 
 
+def role_label(role):
+    labels = {
+        "all": "Tout le monde",
+        "admin": "Administrateurs",
+        "vendeur": "Vendeurs",
+        "directeur_agence": "Directeurs agence",
+        "secretaire": "Secrétaires",
+    }
+    return labels.get(role, role)
+
+
+def get_admin_messages(settings=None):
+    settings = settings if isinstance(settings, dict) else load_settings()
+    messages = settings.get("admin_popup_messages", [])
+    return messages if isinstance(messages, list) else []
+
+
+def message_targets_user(message, user_role):
+    target = clean_visible(message.get("target", "all")) or "all"
+    return target == "all" or target == user_role
+
+
+def get_pending_admin_message(username, user_role, user_data=None, settings=None):
+    user_data = user_data if isinstance(user_data, dict) else {}
+    seen_messages = user_data.get("seen_admin_popup_messages", [])
+    if not isinstance(seen_messages, list):
+        seen_messages = []
+
+    for message in get_admin_messages(settings):
+        message_id = clean_visible(message.get("id", ""))
+        if not message_id or not message.get("active", True):
+            continue
+        if message_id in seen_messages:
+            continue
+        if message_targets_user(message, user_role):
+            return message
+    return None
+
+
+@st.dialog("Message EcoHabitat")
+def show_admin_popup_message(username, message):
+    title = clean_visible(message.get("title", "Information"))
+    body = clean_visible(message.get("body", ""))
+
+    st.markdown(f"### {title}")
+    if body:
+        st.markdown(body.replace("\n", "  \n"))
+
+    if st.button("J'ai compris", type="primary", key=f"confirm_admin_popup_{safe_filename(message.get('id', 'message'))}"):
+        users = load_users()
+        if username in users:
+            seen_messages = users[username].get("seen_admin_popup_messages", [])
+            if not isinstance(seen_messages, list):
+                seen_messages = []
+            message_id = clean_visible(message.get("id", ""))
+            if message_id and message_id not in seen_messages:
+                seen_messages.append(message_id)
+            users[username]["seen_admin_popup_messages"] = seen_messages
+            save_users(users)
+            st.session_state.user = users[username]
+        st.rerun()
+
+
 def get_commercial_agence_assignments(settings=None):
     settings = settings if isinstance(settings, dict) else load_settings()
     assignments = settings.get("commercial_agence_assignments", {})
@@ -1085,7 +1148,7 @@ def ensure_remise_columns(df):
     for col in ["remise_ok_pct", "remise_global_pct", "remise_hors_opc_pct", "remise_hors_opc_global_pct"]:
         if col not in df.columns:
             df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
     return df
 
@@ -1228,7 +1291,7 @@ def ensure_bonus_malus_columns(df):
     for col in ["bonus_malus_ok", "bonus_malus_global"]:
         if col not in df.columns:
             df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
     return df
 
 
@@ -2408,7 +2471,15 @@ if not st.session_state.logged_in:
 user = st.session_state.user
 role = user["role"]
 
-if (
+pending_admin_message = get_pending_admin_message(
+    st.session_state.get("username", ""),
+    role,
+    user,
+)
+
+if pending_admin_message:
+    show_admin_popup_message(st.session_state.get("username", ""), pending_admin_message)
+elif (
     role == "directeur_agence"
     and not user.get("seen_vendeurs_agence_update")
     and not st.session_state.get("directeur_agence_update_dialog_opened")
@@ -2535,7 +2606,8 @@ if role == "admin":
     with st.sidebar.expander("📤 Import ProDevis", expanded=False):
 
         f_confirm = st.file_uploader("Fichier CONFIRM", type=["xlsx"], key="upload_confirm")
-        f_ok = st.file_uploader("Fichier BONLIVR", type=["xlsx"], key="upload_ok")
+        f_ok = st.file_uploader("Fichier BONLIVR (optionnel)", type=["xlsx"], key="upload_ok")
+        st.caption("En début de mois, tu peux lancer le traitement avec seulement CONFIRM. Les livraisons seront à 0 jusqu'à l'import BONLIVR.")
 
         periode = st.text_input("📅 Période", value="Avril 2026", key="periode_input")
 
@@ -2543,12 +2615,15 @@ if role == "admin":
 
     if lancer_traitement:
 
-        if not f_confirm or not f_ok:
-            st.error("❌ Charge les deux fichiers : CONFIRM et BONLIVR.")
+        if not f_confirm:
+            st.error("❌ Charge au minimum le fichier CONFIRM.")
             st.stop()
 
         df_confirm = pd.read_excel(f_confirm, skiprows=28, header=0)
-        df_ok = pd.read_excel(f_ok, skiprows=28, header=0)
+        if f_ok:
+            df_ok = pd.read_excel(f_ok, skiprows=28, header=0)
+        else:
+            df_ok = pd.DataFrame(columns=df_confirm.columns)
 
         for df in [df_confirm, df_ok]:
             df.columns = [str(col).replace("\n", " ").strip() for col in df.columns]
@@ -2887,7 +2962,13 @@ if role == "admin":
         st.session_state.update(data_to_save)
         save_periode(periode, data_to_save)
 
-        st.success(f"✅ {periode} chargé et sauvegardé avec succès !")
+        if f_ok:
+            st.success(f"✅ {periode} chargé et sauvegardé avec succès !")
+        else:
+            st.warning(
+                f"✅ {periode} chargé avec CONFIRM uniquement. "
+                "BONLIVR n'a pas été importé : CA OK, commissions et livraisons restent à 0 jusqu'au prochain import complet."
+            )
 
 
 # ====================== OUTILS SIDEBAR ======================
@@ -3175,7 +3256,8 @@ def afficher_admin_users():
                     "totp_enabled": bool(edit_totp_enabled),
                     "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
                     "totp_confirmed": bool(u.get("totp_confirmed")) if edit_totp_enabled else False,
-                    "seen_vendeurs_agence_update": bool(u.get("seen_vendeurs_agence_update"))
+                    "seen_vendeurs_agence_update": bool(u.get("seen_vendeurs_agence_update")),
+                    "seen_admin_popup_messages": u.get("seen_admin_popup_messages", [])
                 }
 
                 if edit_password:
@@ -3197,6 +3279,101 @@ def afficher_admin_users():
 
                 st.success("Utilisateur modifié ✅")
                 st.rerun()
+
+    st.divider()
+
+    st.write("### 📣 Messages pop-up")
+    st.caption("Crée un message qui s'affichera à l'ouverture de l'utilisateur ciblé. Il disparaît quand l'utilisateur clique sur « J'ai compris ».")
+
+    popup_messages = get_admin_messages(settings)
+    if popup_messages:
+        df_messages = pd.DataFrame(
+            [
+                {
+                    "Titre": clean_visible(message.get("title", "")),
+                    "Cible": role_label(clean_visible(message.get("target", "all")) or "all"),
+                    "Actif": "Oui" if message.get("active", True) else "Non",
+                    "Créé le": clean_visible(message.get("created_at", "")),
+                }
+                for message in popup_messages
+            ]
+        )
+        st.dataframe(df_messages, use_container_width=True)
+    else:
+        st.info("Aucun message pop-up actif ou enregistré.")
+
+    with st.form("admin_popup_message_form"):
+        msg_col1, msg_col2 = st.columns([2, 1])
+        with msg_col1:
+            popup_title = st.text_input("Titre du message", key="popup_message_title")
+        with msg_col2:
+            popup_target = st.selectbox(
+                "Destinataire",
+                ["all", "admin", "vendeur", "directeur_agence", "secretaire"],
+                format_func=role_label,
+                key="popup_message_target"
+            )
+        popup_body = st.text_area(
+            "Message à afficher",
+            height=120,
+            placeholder="Exemple : Bonjour, une nouvelle fonctionnalité est disponible dans votre espace...",
+            key="popup_message_body"
+        )
+        send_popup_message = st.form_submit_button("📣 Envoyer le message", type="primary")
+
+    if send_popup_message:
+        if not clean_visible(popup_title) or not clean_visible(popup_body):
+            st.error("Titre et message sont obligatoires.")
+        else:
+            popup_messages.append({
+                "id": f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}",
+                "title": clean_visible(popup_title),
+                "body": clean_visible(popup_body),
+                "target": popup_target,
+                "active": True,
+                "created_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "created_by": st.session_state.get("username", "")
+            })
+            settings["admin_popup_messages"] = popup_messages
+            save_settings(settings)
+            st.success("Message pop-up envoyé ✅")
+            st.rerun()
+
+    active_message_options = [
+        message
+        for message in popup_messages
+        if clean_visible(message.get("id", ""))
+    ]
+    if active_message_options:
+        popup_to_manage_id = st.selectbox(
+            "Message à gérer",
+            [message["id"] for message in active_message_options],
+            format_func=lambda message_id: next(
+                (
+                    f"{clean_visible(message.get('title', 'Message'))} → {role_label(clean_visible(message.get('target', 'all')) or 'all')}"
+                    for message in active_message_options
+                    if message.get("id") == message_id
+                ),
+                message_id
+            ),
+            key="popup_message_manage"
+        )
+        manage_col1, manage_col2 = st.columns(2)
+        if manage_col1.button("Désactiver ce message", key="disable_popup_message"):
+            for message in popup_messages:
+                if message.get("id") == popup_to_manage_id:
+                    message["active"] = False
+            settings["admin_popup_messages"] = popup_messages
+            save_settings(settings)
+            st.success("Message désactivé ✅")
+            st.rerun()
+        if manage_col2.button("Supprimer ce message", key="delete_popup_message"):
+            settings["admin_popup_messages"] = [
+                message for message in popup_messages if message.get("id") != popup_to_manage_id
+            ]
+            save_settings(settings)
+            st.success("Message supprimé ✅")
+            st.rerun()
 
     st.divider()
 
