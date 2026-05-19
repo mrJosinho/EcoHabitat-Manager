@@ -107,6 +107,112 @@ p, label {
     font-weight: 600;
 }
 
+.user-profile-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: #E9F8EE;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+}
+
+.user-avatar-wrap {
+    width: 48px;
+    height: 48px;
+    flex: 0 0 48px;
+}
+
+.user-avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #FFFFFF;
+    box-shadow: 0 3px 10px rgba(31, 41, 51, 0.14);
+}
+
+.user-avatar-fallback {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: #66B32E;
+    color: #FFFFFF !important;
+    font-weight: 800;
+    border: 2px solid #FFFFFF;
+}
+
+.user-profile-name {
+    font-weight: 800;
+    line-height: 1.25;
+}
+
+.user-profile-role {
+    color: #4B5563 !important;
+    font-size: 13px;
+    margin-top: 2px;
+}
+
+.top-user-profile {
+    margin-left: auto;
+    width: fit-content;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(255, 255, 255, 0.92);
+    border: 1px solid #E5E7EB;
+    border-radius: 999px;
+    padding: 7px 12px 7px 7px;
+    box-shadow: 0 4px 14px rgba(31, 41, 51, 0.12);
+}
+
+.top-user-avatar-wrap {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+}
+
+.top-user-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #FFFFFF;
+}
+
+.top-user-avatar-fallback {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: #66B32E;
+    color: #FFFFFF !important;
+    font-weight: 800;
+    border: 2px solid #FFFFFF;
+}
+
+.top-user-name {
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.1;
+}
+
+.top-user-role {
+    font-size: 11px;
+    color: #6B7280 !important;
+}
+
+@media (max-width: 900px) {
+    .top-user-profile {
+        display: none;
+    }
+}
+
 /* TABS */
 button[data-baseweb="tab"] {
     font-weight: 700;
@@ -284,6 +390,7 @@ HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
 ATTENTE_MOTIFS_FILE = DATA_DIR / "motifs_attente.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+USER_PHOTO_BASE_URL = "https://ecohabitat76.fr/signature/photo"
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_LOCK_SECONDS = 5 * 60
 
@@ -818,6 +925,88 @@ def clean_visible(s):
     if pd.isna(s):
         return ""
     return " ".join(str(s).replace(chr(160), " ").split()).strip()
+
+
+def user_photo_slug(user):
+    user = user if isinstance(user, dict) else {}
+    explicit_photo = clean_visible(user.get("photo", ""))
+    if explicit_photo:
+        return strip_accents(explicit_photo.rsplit(".", 1)[0]).lower()
+
+    nom = clean_visible(user.get("nom", ""))
+    aliases = {
+        "LUCCHINI JOSEPH": "joseph",
+        "FOUGERES CHRISTELLE": "christelle",
+        "PRIEUR CORENTIN": "prieur corentin",
+        "AYACHE ADEL": "adel",
+        "VUE JONATHAN": "jonathan",
+        "EL GHAZOUANI NAHIM": "nahim",
+        "LEMOINE KEVIN": "kevin",
+    }
+    user_key = strip_accents(normalize_key(nom))
+    if user_key in aliases:
+        return aliases[user_key]
+
+    parts = strip_accents(nom).lower().split()
+    return re.sub(r"[^a-z0-9_-]+", "", parts[-1]) if parts else "profil"
+
+
+def user_photo_url(user):
+    return f"{USER_PHOTO_BASE_URL}/{quote(user_photo_slug(user), safe='')}.jpg"
+
+
+def user_initials(user):
+    nom = clean_visible(user.get("nom", "")) if isinstance(user, dict) else ""
+    parts = nom.split()
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][:1] + parts[-1][:1]).upper()
+
+
+def render_sidebar_user_profile(user, role):
+    safe_name = html.escape(clean_visible(user.get("nom", "")))
+    safe_role = html.escape(clean_visible(role_label(role)))
+    safe_photo = html.escape(user_photo_url(user), quote=True)
+    safe_initials = html.escape(user_initials(user))
+    st.sidebar.markdown(
+        f"""
+        <div class="user-profile-card">
+            <div class="user-avatar-wrap">
+                <img class="user-avatar" src="{safe_photo}" alt="{safe_name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <div class="user-avatar-fallback">{safe_initials}</div>
+            </div>
+            <div>
+                <div class="user-profile-name">{safe_name}</div>
+                <div class="user-profile-role">{safe_role}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def render_top_user_profile(user, role):
+    safe_name = html.escape(clean_visible(user.get("nom", "")))
+    safe_role = html.escape(clean_visible(role_label(role)))
+    safe_photo = html.escape(user_photo_url(user), quote=True)
+    safe_initials = html.escape(user_initials(user))
+    st.markdown(
+        f"""
+        <div class="top-user-profile">
+            <div class="top-user-avatar-wrap">
+                <img class="top-user-avatar" src="{safe_photo}" alt="{safe_name}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                <div class="top-user-avatar-fallback">{safe_initials}</div>
+            </div>
+            <div>
+                <div class="top-user-name">{safe_name}</div>
+                <div class="top-user-role">{safe_role}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 def keep_best_display_name(existing, candidate):
@@ -2518,7 +2707,7 @@ if role in ["admin", "vendeur", "directeur_agence", "secretaire"] and not st.ses
     st.session_state[f"sidebar_auto_collapsed_{role}"] = True
 
 
-col1, col2 = st.columns([1, 6])
+col1, col2, col3 = st.columns([1, 5, 2])
 
 with col1:
     try:
@@ -2530,7 +2719,10 @@ with col2:
     st.markdown('<div class="eco-title">gesCom EcoHabitat</div>', unsafe_allow_html=True)
     st.markdown('<div class="eco-subtitle">L’excellence au service de votre habitat</div>', unsafe_allow_html=True)
 
-st.sidebar.success(f"Connecté : {user['nom']} ({role})")
+with col3:
+    render_top_user_profile(user, role)
+
+render_sidebar_user_profile(user, role)
 
 if st.sidebar.button("🚪 Déconnexion"):
     for k in [
@@ -3179,6 +3371,7 @@ def afficher_admin_users():
         new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence", "secretaire"], key="new_role")
         new_nom = st.text_input("Nom vendeur / utilisateur", key="new_nom").upper().strip()
         new_agence = st.text_input("Agence si directeur", key="new_agence").upper().strip()
+        new_photo = st.text_input("Fichier photo", key="new_photo", placeholder="ex : prieur corentin.jpg").strip()
         new_totp_enabled = st.checkbox("Activer Authenticator (2FA)", key="new_totp_enabled")
 
     if st.button("Créer utilisateur", type="primary"):
@@ -3194,6 +3387,7 @@ def afficher_admin_users():
                 "role": new_role,
                 "nom": new_nom,
                 "agence": new_agence if new_role == "directeur_agence" else None,
+                "photo": clean_visible(new_photo),
                 "totp_enabled": bool(new_totp_enabled),
                 "totp_secret": generate_totp_secret() if new_totp_enabled else "",
                 "totp_confirmed": False
@@ -3227,6 +3421,7 @@ def afficher_admin_users():
             edit_role = st.selectbox("Rôle", role_options, index=role_index, key="edit_role")
             edit_nom = st.text_input("Nom vendeur / utilisateur", value=u.get("nom", ""), key="edit_nom").upper().strip()
             edit_agence = st.text_input("Agence", value=u.get("agence") or "", key="edit_agence").upper().strip()
+            edit_photo = st.text_input("Fichier photo", value=u.get("photo") or "", key="edit_photo", placeholder="ex : prieur corentin.jpg").strip()
             edit_totp_enabled = st.checkbox(
                 "Activer Authenticator (2FA)",
                 value=bool(u.get("totp_enabled")),
@@ -3253,6 +3448,7 @@ def afficher_admin_users():
                     "role": edit_role,
                     "nom": edit_nom,
                     "agence": edit_agence if edit_role == "directeur_agence" else None,
+                    "photo": clean_visible(edit_photo),
                     "totp_enabled": bool(edit_totp_enabled),
                     "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
                     "totp_confirmed": bool(u.get("totp_confirmed")) if edit_totp_enabled else False,
