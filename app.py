@@ -2160,6 +2160,10 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
             ws.cell(row=row_idx, column=6).value = commission_pct / 100
             ws.cell(row=row_idx, column=7).value = commission_eur
             ws.cell(row=row_idx, column=8).value = points_perdus / 100
+            ws.cell(row=row_idx, column=5).number_format = '#,##0.00 €'
+            ws.cell(row=row_idx, column=6).number_format = '0.00%'
+            ws.cell(row=row_idx, column=7).number_format = '#,##0.00 €'
+            ws.cell(row=row_idx, column=8).number_format = '0.00%'
 
     if df_directeurs is not None and not df_directeurs.empty:
         for _, directeur in df_directeurs.iterrows():
@@ -2174,6 +2178,7 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
             montant = to_float(directeur.get("commission_magasin_eur", 0))
             # EVP : règle commission magasin conservée, sans toucher aux autres colonnes.
             ws.cell(row=row_idx, column=10).value = montant if montant > 0 else None
+            ws.cell(row=row_idx, column=10).number_format = '#,##0.00 €'
 
     try:
         wb.calculation.fullCalcOnLoad = True
