@@ -2196,8 +2196,6 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
     except Exception:
         pass
 
-    remove_workbook_tables_before_download(wb)
-
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
