@@ -2154,24 +2154,12 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
             commission_eur = to_float(vendeur.get("commission_eur", 0))
             points_perdus = to_float(vendeur.get("points_perdus", 0))
 
+            # EVP : on écrit uniquement les 4 colonnes commerciales.
+            # Le reste du classeur reste strictement inchangé.
             ws.cell(row=row_idx, column=5).value = ca_ok
-            ws.cell(row=row_idx, column=5).number_format = '#,##0.00 €'
             ws.cell(row=row_idx, column=6).value = commission_pct / 100
-            ws.cell(row=row_idx, column=6).number_format = '0.00%'
-
-            if commission_pct == 0:
-                ws.cell(row=row_idx, column=7).value = None
-                ws.cell(row=row_idx, column=8).value = None
-            else:
-                montant_cell = ws.cell(row=row_idx, column=7)
-                if not isinstance(montant_cell.value, str) or not montant_cell.value.startswith("="):
-                    montant_cell.value = commission_eur
-                    montant_cell.number_format = '#,##0.00 €'
-                ws.cell(row=row_idx, column=7).number_format = '#,##0.00 €'
-                ws.cell(row=row_idx, column=8).value = points_perdus / 100
-                ws.cell(row=row_idx, column=8).number_format = '0.00%'
-
-            ws.cell(row=row_idx, column=14).value = None
+            ws.cell(row=row_idx, column=7).value = commission_eur
+            ws.cell(row=row_idx, column=8).value = points_perdus / 100
 
     if df_directeurs is not None and not df_directeurs.empty:
         for _, directeur in df_directeurs.iterrows():
@@ -2184,11 +2172,8 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
                 continue
 
             montant = to_float(directeur.get("commission_magasin_eur", 0))
-            if montant > 0:
-                ws.cell(row=row_idx, column=10).value = montant
-                ws.cell(row=row_idx, column=10).number_format = '#,##0.00 €'
-            else:
-                ws.cell(row=row_idx, column=10).value = None
+            # EVP : règle commission magasin conservée, sans toucher aux autres colonnes.
+            ws.cell(row=row_idx, column=10).value = montant if montant > 0 else None
 
     try:
         wb.calculation.fullCalcOnLoad = True
