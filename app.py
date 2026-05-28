@@ -2100,6 +2100,21 @@ def make_pdf_zip(items):
     return buffer.getvalue()
 
 
+def remove_workbook_tables_before_download(wb):
+    """
+    Les fichiers EVP contiennent des objets "Tableau" Excel.
+    OpenPyXL peut les réécrire avec un XML que certaines versions d'Excel réparent
+    à l'ouverture. On supprime uniquement ces objets de table dans la copie
+    téléchargée : les cellules, formules, styles et valeurs restent en place.
+    """
+    for ws in wb.worksheets:
+        try:
+            for table_name in list(ws.tables.keys()):
+                del ws.tables[table_name]
+        except Exception:
+            continue
+
+
 def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
     target_sheet = sheet_name_evp_for_next_month(periode)
     if not target_sheet:
@@ -2180,6 +2195,8 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
         wb.calculation.forceFullCalc = True
     except Exception:
         pass
+
+    remove_workbook_tables_before_download(wb)
 
     output = io.BytesIO()
     wb.save(output)
