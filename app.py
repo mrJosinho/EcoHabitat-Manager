@@ -671,6 +671,16 @@ def save_motifs_attente(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
+def format_motif_updated_at(value):
+    value = clean_visible(value)
+    if not value:
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return value
+
+
 # ====================== FONCTIONS DESIGN ======================
 
 def card(title, value):
@@ -3992,6 +4002,24 @@ def afficher_dossiers_en_attente(tab):
         attente["Dernière relance"] = attente["_ATTENTE_KEY_"].apply(
             lambda key: clean_visible(motifs_attente.get(key, {}).get("derniere_relance", ""))
         )
+        attente["Annoté par"] = attente["_ATTENTE_KEY_"].apply(
+            lambda key: clean_visible(motifs_attente.get(key, {}).get("updated_by", ""))
+        )
+        attente["Mise à jour motif"] = attente["_ATTENTE_KEY_"].apply(
+            lambda key: format_motif_updated_at(motifs_attente.get(key, {}).get("updated_at", ""))
+        )
+
+        if role == "directeur_agence":
+            directeur_agence = clean_visible(user.get("agence", ""))
+            if not directeur_agence:
+                st.warning("Aucune agence n'est affectée à ce compte directeur.")
+                return
+            attente = attente[
+                attente[col_agence].apply(normalize_key) == normalize_key(directeur_agence)
+            ]
+            if attente.empty:
+                st.success(f"Aucun dossier en attente pour l'agence {directeur_agence}.")
+                return
 
         if col_op and col_op in attente.columns:
             attente["OPC"] = np.where(attente.apply(lambda row: is_opc(row, col_op), axis=1), "OUI", "")
@@ -4016,7 +4044,11 @@ def afficher_dossiers_en_attente(tab):
         f1, f2, f3, f4, f5 = st.columns([2, 2, 1, 2, 2])
 
         vendeur_filtre = f1.selectbox("Commercial", ["Tous"] + vendeurs, key="attente_filtre_vendeur")
-        agence_filtre = f2.selectbox("Agence", ["Toutes"] + agences, key="attente_filtre_agence")
+        if role == "directeur_agence":
+            agence_filtre = clean_visible(user.get("agence", ""))
+            f2.text_input("Agence", value=agence_filtre, disabled=True, key="attente_filtre_agence_directeur")
+        else:
+            agence_filtre = f2.selectbox("Agence", ["Toutes"] + agences, key="attente_filtre_agence")
         opc_filtre = f3.selectbox("OPC", ["Tous", "Oui", "Non"], key="attente_filtre_opc")
         recherche = f4.text_input("Recherche client / document", key="attente_recherche").strip()
         motif_filtre = f5.selectbox(
@@ -4190,6 +4222,11 @@ def afficher_dossiers_en_attente(tab):
                 if save_motif:
                     if not clean_visible(motif_value):
                         st.error("Le motif d'attente est obligatoire.")
+                    elif (
+                        role == "directeur_agence"
+                        and normalize_key(selected_row.get(col_agence, "")) != normalize_key(user.get("agence", ""))
+                    ):
+                        st.error("Tu peux modifier uniquement les dossiers de ton agence.")
                     else:
                         previous_relance = clean_visible(selected_record.get("derniere_relance", ""))
                         motifs_attente[selected_key] = {
@@ -4203,7 +4240,7 @@ def afficher_dossiers_en_attente(tab):
                         st.success("Motif d'attente enregistré ✅")
                         st.rerun()
 
-                if role != "secretaire":
+                if role == "admin":
                     mail_subject = f"Éléments manquants dossier {clean_visible(selected_row.get(col_client, ''))}"
                     mail_body = (
                         "Bonjour,\n\n"
@@ -4226,7 +4263,9 @@ def afficher_dossiers_en_attente(tab):
             "Remise %",
             "OPC",
             "Motif d'attente",
-            "Détail motif"
+            "Détail motif",
+            "Annoté par",
+            "Mise à jour motif"
         ]
         cols_show = list(dict.fromkeys([c for c in cols_show if c and c in filtered.columns]))
         affichage = filtered[cols_show].copy()
@@ -4265,7 +4304,7 @@ def afficher_dossiers_en_attente(tab):
             selection_mode="single-row"
         )
 
-        if role != "secretaire" and not filtered.empty:
+        if role == "admin" and not filtered.empty:
             with st.expander("📧 Mail interne hebdomadaire", expanded=False):
                 settings = load_settings()
                 internal_recipients = st.text_input(
@@ -4475,6 +4514,7 @@ if st.session_state.get("df_vendeurs") is not None:
     elif role == "directeur_agence":
         pages = [
             "👤 Mes chiffres",
+            "⏳ En attente",
             "📆 Annuel",
             "👥 Vendeurs agence",
             "🏢 Mon agence",
@@ -5219,6 +5259,8 @@ if st.session_state.get("df_vendeurs") is not None:
     elif role == "directeur_agence":
         if active_page == "👤 Mes chiffres":
             afficher_vendeur(st.container(), vendeur_forced=user["nom"])
+        if active_page == "⏳ En attente":
+            afficher_dossiers_en_attente(st.container())
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
         if active_page == "👥 Vendeurs agence":
