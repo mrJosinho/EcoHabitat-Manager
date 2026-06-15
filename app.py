@@ -832,7 +832,11 @@ def render_table_with_status_tooltips(df, tooltip_by_index=None, height=600):
         html_parts.append("</tr>")
 
     html_parts.append("</tbody></table></div>")
-    components.html("".join(html_parts), height=height + 40, scrolling=True)
+    table_html = "".join(html_parts)
+    if hasattr(st, "html"):
+        st.html(table_html)
+    else:
+        components.html(table_html, height=height + 40, scrolling=True)
 
 
 def build_attente_internal_mail_body(df, periode, col_client, col_doc, col_date, col_agence, col_ca_magasin):
@@ -1743,7 +1747,7 @@ def pdf_format_value(value):
     return pdf_text(value)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4, ttl=1800)
 def make_simple_pdf(title, metrics, df):
     page_w, page_h = 841.89, 595.28
     margin = 24
@@ -2100,6 +2104,21 @@ def make_pdf_zip(items):
     return buffer.getvalue()
 
 
+def clear_heavy_session_artifacts():
+    prefixes = (
+        "pdf_cache_",
+        "sidebar_bulk_pdf_zip_",
+        "sidebar_bulk_pdf_count_",
+    )
+    for key in list(st.session_state.keys()):
+        if key == "_indicateurs_cache" or any(str(key).startswith(prefix) for prefix in prefixes):
+            st.session_state.pop(key, None)
+    try:
+        make_simple_pdf.clear()
+    except Exception:
+        pass
+
+
 def remove_workbook_tables_before_download(wb):
     """
     Les fichiers EVP contiennent des objets "Tableau" Excel.
@@ -2200,7 +2219,7 @@ def save_periode(periode, data):
     load_all_historique_cached.clear()
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4, ttl=3600)
 def load_periode_cached(periode, file_mtime_ns):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
     with open(file_path, "rb") as f:
@@ -2215,6 +2234,7 @@ def load_periode(periode):
 
 
 def load_periode_preserve_ui(periode):
+    clear_heavy_session_artifacts()
     saved_data = load_periode(periode)
     if not saved_data:
         return False
@@ -2359,7 +2379,7 @@ def historique_signature():
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2, ttl=1800)
 def load_all_historique_cached(signature):
     rows_vendeurs = []
     rows_agences = []
@@ -2483,19 +2503,33 @@ if not st.session_state.logged_in:
         logo_html = "<div class='login-logo-fallback'>🏠</div>"
 
     login_video_html = ""
-    for video_name, mime_type in [
-        ("login_background.mp4", "video/mp4"),
-        ("login_background.webm", "video/webm"),
-    ]:
-        video_path = Path(video_name)
-        if video_path.exists():
-            video_b64 = base64.b64encode(video_path.read_bytes()).decode("utf-8")
-            login_video_html = (
-                f'<video class="login-video-bg" autoplay muted loop playsinline>'
-                f'<source src="data:{mime_type};base64,{video_b64}" type="{mime_type}">'
-                f'</video><div class="login-video-overlay"></div>'
-            )
-            break
+    static_video_webm = Path("static/login_background.webm")
+    static_video_mp4 = Path("static/login_background.mp4")
+    if static_video_webm.exists() or static_video_mp4.exists():
+        sources = []
+        if static_video_webm.exists():
+            sources.append('<source src="app/static/login_background.webm" type="video/webm">')
+        if static_video_mp4.exists():
+            sources.append('<source src="app/static/login_background.mp4" type="video/mp4">')
+        login_video_html = (
+            '<video class="login-video-bg" autoplay muted loop playsinline preload="metadata">'
+            + "".join(sources)
+            + '</video><div class="login-video-overlay"></div>'
+        )
+    else:
+        for video_name, mime_type in [
+            ("login_background.mp4", "video/mp4"),
+            ("login_background.webm", "video/webm"),
+        ]:
+            video_path = Path(video_name)
+            if video_path.exists():
+                video_b64 = base64.b64encode(video_path.read_bytes()).decode("utf-8")
+                login_video_html = (
+                    f'<video class="login-video-bg" autoplay muted loop playsinline preload="metadata">'
+                    f'<source src="data:{mime_type};base64,{video_b64}" type="{mime_type}">'
+                    f'</video><div class="login-video-overlay"></div>'
+                )
+                break
 
     st.markdown(
         f"""
@@ -2782,6 +2816,7 @@ if role == "admin" and periodes_dispo:
             key="periode_delete_button"
         ):
             if delete_periode(periode_delete):
+                clear_heavy_session_artifacts()
                 if st.session_state.get("periode") == periode_delete:
                     keys_to_clear = [
                         "df_vendeurs", "df_agences", "df_directeurs",
@@ -2811,6 +2846,7 @@ if role == "admin":
         lancer_traitement = st.button("🚀 Lancer le traitement", type="primary")
 
     if lancer_traitement:
+        clear_heavy_session_artifacts()
 
         if not f_confirm:
             st.error("❌ Charge au minimum le fichier CONFIRM.")
@@ -3156,6 +3192,7 @@ if role == "admin":
             "periode": periode
         }
 
+        clear_heavy_session_artifacts()
         st.session_state.update(data_to_save)
         save_periode(periode, data_to_save)
 
