@@ -2369,20 +2369,36 @@ def set_evp_excluded_keys(settings, period_key, keys):
     settings["evp_personnel_excluded_keys_by_period"] = by_period
 
 
+def format_evp_affectation(value):
+    return clean_visible(value).upper()
+
+
+def format_evp_person_name(value):
+    text = clean_visible(value)
+    if not text:
+        return ""
+    parts = text.split()
+    if len(parts) == 1:
+        return parts[0].upper()
+    nom = " ".join(parts[:-1]).upper()
+    prenom = parts[-1].lower().capitalize()
+    return f"{nom} {prenom}"
+
+
 def get_evp_affectation_options(settings=None):
     settings = settings if isinstance(settings, dict) else load_settings()
     values = set()
     for rows in get_evp_seed_data().values():
         if isinstance(rows, list):
-            values.update(clean_visible(row.get("Affectation", "")) for row in rows if isinstance(row, dict))
-    values.update(clean_visible(row.get("Affectation", "")) for row in DEFAULT_EVP_PERSONNEL)
+            values.update(format_evp_affectation(row.get("Affectation", "")) for row in rows if isinstance(row, dict))
+    values.update(format_evp_affectation(row.get("Affectation", "")) for row in DEFAULT_EVP_PERSONNEL)
     try:
         assignments = get_commercial_agence_assignments(settings)
-        values.update(clean_visible(agence) for agence in assignments.values())
+        values.update(format_evp_affectation(agence) for agence in assignments.values())
     except Exception:
         pass
     values = {v for v in values if v}
-    return sorted(values, key=normalize_key) or ["Bourg Achard", "Harfleur", "Maromme", "YVETOT"]
+    return sorted(values, key=normalize_key) or ["BOURG ACHARD", "HARFLEUR", "MAROMME", "YVETOT"]
 
 
 def build_evp_auto_maps(df_vendeurs, df_directeurs):
@@ -2394,6 +2410,7 @@ def build_evp_auto_maps(df_vendeurs, df_directeurs):
                 continue
             key = resolve_nom_evp(nom)
             vendeurs_map[key] = {
+                "NOM_PRENOM": format_evp_person_name(nom),
                 "Total vente HT": round(to_float(vendeur.get("ca_ok", 0)), 2),
                 "taux": round(to_float(vendeur.get("commission_pct", 0)) / 100, 4),
                 "Montant": round(to_float(vendeur.get("commission_eur", 0)), 2),
@@ -2438,8 +2455,8 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
         for key, saved in saved_rows.items():
             if key not in known_keys and key not in excluded_keys and isinstance(saved, dict):
                 personnel.append({
-                    "Affectation": saved.get("Affectation", ""),
-                    "NOM_PRENOM": saved.get("NOM_PRENOM", key.title()),
+                    "Affectation": format_evp_affectation(saved.get("Affectation", "")),
+                    "NOM_PRENOM": format_evp_person_name(saved.get("NOM_PRENOM", key)),
                     "Contrat": saved.get("Contrat", ""),
                     "Salaire Fixe": saved.get("Salaire Fixe", "")
                 })
@@ -2457,8 +2474,8 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
         auto = vendeurs_map.get(key, {}) if apply_auto_commissions else {}
 
         row = {header: "" for header in EVP_HEADERS}
-        row["Affectation"] = clean_visible(manual.get("Affectation", base.get("Affectation", "")))
-        row["NOM_PRENOM"] = clean_visible(manual.get("NOM_PRENOM", nom))
+        row["Affectation"] = format_evp_affectation(manual.get("Affectation", base.get("Affectation", "")))
+        row["NOM_PRENOM"] = format_evp_person_name(manual.get("NOM_PRENOM", nom))
         row["Contrat"] = clean_visible(manual.get("Contrat", base.get("Contrat", "")))
         row["Salaire Fixe"] = manual.get("Salaire Fixe", base.get("Salaire Fixe", ""))
 
@@ -2605,8 +2622,8 @@ def save_evp_manual_dataframe(settings, period_key, edited_df, original_df=None)
             continue
         key = resolve_nom_evp(nom)
         manual = {
-            "Affectation": clean_visible(row.get("Affectation", "")),
-            "NOM_PRENOM": nom,
+            "Affectation": format_evp_affectation(row.get("Affectation", "")),
+            "NOM_PRENOM": format_evp_person_name(nom),
             "Contrat": clean_visible(row.get("Contrat", "")),
         }
         for col in EVP_MANUAL_COLUMNS:
@@ -4839,7 +4856,7 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                 add_person = st.form_submit_button("➕ Ajouter")
 
             if add_person:
-                nom_clean = clean_visible(new_nom)
+                nom_clean = format_evp_person_name(new_nom)
                 if not nom_clean:
                     st.error("Le nom/prénom est obligatoire.")
                 else:
@@ -4856,7 +4873,7 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                         if not isinstance(period_data, dict):
                             period_data = {}
                         period_data[key] = {
-                            "Affectation": clean_visible(new_affectation),
+                            "Affectation": format_evp_affectation(new_affectation),
                             "NOM_PRENOM": nom_clean,
                             "Contrat": clean_visible(new_contrat),
                             "Salaire Fixe": new_salaire if new_salaire else ""
