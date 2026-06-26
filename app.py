@@ -19,7 +19,8 @@ import zipfile
 import unicodedata
 from datetime import datetime
 from urllib.parse import quote, urlencode
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 # ====================== CONFIG ======================
 
@@ -382,7 +383,9 @@ input:focus, textarea:focus, select:focus {
 
 # ====================== STOCKAGE LOCAL / RENDER / OVH ======================
 
-DATA_DIR = Path("/data") if Path("/data").exists() else Path(".")
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path("/data") if Path("/data").exists() else APP_DIR
+EVP_SEED_FILE = DATA_DIR / "evp_seed.json"
 
 HISTORIQUE_DIR = DATA_DIR / "historique"
 HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
@@ -652,6 +655,98 @@ MOTIFS_ATTENTE_OPTIONS = [
     "OPC / offre commerciale à vérifier",
     "Erreur ou information ProDevis",
     "Autre"
+]
+
+EVP_HEADERS = [
+    "Affectation",
+    "NOM_PRENOM",
+    "Contrat",
+    "Acompte versé",
+    "Total vente HT",
+    "taux",
+    "Montant",
+    "décommission",
+    "Comm. Equipe",
+    "Comm. Magasin",
+    "P. annuelle",
+    "dates absence",
+    "motif absence",
+    "Autre",
+    "Mutuelle",
+    "SAISIE/SAL.",
+    "Salaire Fixe",
+    "Acompte a reprendre",
+    "Solde acompte après reprise"
+]
+
+EVP_AUTO_COLUMNS = ["Total vente HT", "taux", "Montant", "décommission", "Comm. Magasin", "Solde acompte après reprise"]
+EVP_PERCENT_COLUMNS = ["taux", "décommission"]
+EVP_NUMERIC_COLUMNS = [
+    "Acompte versé",
+    "Total vente HT",
+    "taux",
+    "Montant",
+    "décommission",
+    "Comm. Equipe",
+    "Comm. Magasin",
+    "P. annuelle",
+    "Salaire Fixe",
+    "Acompte a reprendre",
+    "Solde acompte après reprise",
+]
+EVP_MANUAL_COLUMNS = [
+    "Acompte versé",
+    "Comm. Equipe",
+    "P. annuelle",
+    "dates absence",
+    "motif absence",
+    "Autre",
+    "Mutuelle",
+    "SAISIE/SAL.",
+    "Salaire Fixe",
+    "Acompte a reprendre"
+]
+EVP_BASE_COLUMNS = ["Affectation", "NOM_PRENOM", "Contrat"]
+
+DEFAULT_EVP_PERSONNEL = [
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "BALDACCHINO Antoine", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "GELLY Gaëtan", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "JARRY Jérôme", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "OUZAID DRISS", "Contrat": "CDI", "Salaire Fixe": 950},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "TRUONG Laugan", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "VUE JONATHAN", "Contrat": "CDI", "Salaire Fixe": 2000},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "DUSSART Robin", "Contrat": "APP", "Salaire Fixe": ""},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "EL GHAZOUANI NAHIM", "Contrat": "CDI", "Salaire Fixe": 1800},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "JOUVE Amon", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "LEMONNIER Florian", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "LEVASSEUR Nicolas", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "MONNIER Clément", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "PRIEUR Corentin", "Contrat": "CDI", "Salaire Fixe": 950},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "ROSANI Lorenzo", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "ROSANI Luca", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "SCOLAN Marc", "Contrat": "CDI", "Salaire Fixe": 950},
+    {"Affectation": "Maromme", "NOM_PRENOM": "ALARD Jennifer", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "Maromme", "NOM_PRENOM": "AYACHE ADEL", "Contrat": "CDI", "Salaire Fixe": 1800},
+    {"Affectation": "Maromme", "NOM_PRENOM": "FONTAINE Malvin", "Contrat": "APP", "Salaire Fixe": ""},
+    {"Affectation": "Maromme", "NOM_PRENOM": "GHRISSI JELLOUL", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Maromme", "NOM_PRENOM": "LAMBERT Toma", "Contrat": "APP", "Salaire Fixe": ""},
+    {"Affectation": "Maromme", "NOM_PRENOM": "LEMOINE Kevin", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Maromme", "NOM_PRENOM": "LEMONNIER Henri", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "Maromme", "NOM_PRENOM": "TRAIKIA Adam", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "BARON Julien", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "BOCQUET FEDIA", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "CHASTEL Matis", "Contrat": "APP", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "CLEMENT Corentin", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "DELAUNAY Thierry", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "DUCHESNE Baptiste", "Contrat": "APP", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "FOUGERES Christelle", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "JOLY SYLVESTRE", "Contrat": "CDI", "Salaire Fixe": 950},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "LINTOT Kevin", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "MORICE Killian", "Contrat": "CDI", "Salaire Fixe": 750},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "PERTUISEL JEREMY", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "PETRIMAUX ROMAIN", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "RACINE Elodie", "Contrat": "CDI", "Salaire Fixe": ""},
+    {"Affectation": "YVETOT", "NOM_PRENOM": "ROSAY JOHANICK", "Contrat": "CDI", "Salaire Fixe": ""},
 ]
 
 
@@ -2221,6 +2316,392 @@ def update_evp_workbook(evp_file, df_vendeurs, df_directeurs, periode):
     return output.getvalue(), None, sorted(set(absents))
 
 
+def evp_period_key_from_periode(periode):
+    target_sheet = sheet_name_evp_for_next_month(periode)
+    return target_sheet or clean_visible(periode) or "EVP"
+
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def load_evp_seed_data(file_mtime_ns):
+    if not EVP_SEED_FILE.exists():
+        return {}
+    try:
+        with open(EVP_SEED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_evp_seed_data():
+    mtime = EVP_SEED_FILE.stat().st_mtime_ns if EVP_SEED_FILE.exists() else 0
+    return load_evp_seed_data(mtime)
+
+
+def get_evp_month_options():
+    seed = get_evp_seed_data()
+    options = [m for m in seed.keys() if m != "MODELE"]
+    if options:
+        return options
+    return [sheet_name_evp_for_next_month(st.session_state.get("periode", "")) or "EVP"]
+
+
+def get_evp_seed_rows(period_key):
+    seed = get_evp_seed_data()
+    rows = seed.get(period_key, [])
+    if isinstance(rows, list) and rows:
+        return rows
+    return DEFAULT_EVP_PERSONNEL.copy()
+
+
+def get_evp_excluded_keys(settings, period_key):
+    by_period = settings.get("evp_personnel_excluded_keys_by_period", {})
+    if isinstance(by_period, dict):
+        return set(by_period.get(period_key, []))
+    return set()
+
+
+def set_evp_excluded_keys(settings, period_key, keys):
+    by_period = settings.get("evp_personnel_excluded_keys_by_period", {})
+    if not isinstance(by_period, dict):
+        by_period = {}
+    by_period[period_key] = sorted(set(keys))
+    settings["evp_personnel_excluded_keys_by_period"] = by_period
+
+
+def get_evp_affectation_options(settings=None):
+    settings = settings if isinstance(settings, dict) else load_settings()
+    values = set()
+    for rows in get_evp_seed_data().values():
+        if isinstance(rows, list):
+            values.update(clean_visible(row.get("Affectation", "")) for row in rows if isinstance(row, dict))
+    values.update(clean_visible(row.get("Affectation", "")) for row in DEFAULT_EVP_PERSONNEL)
+    try:
+        assignments = get_commercial_agence_assignments(settings)
+        values.update(clean_visible(agence) for agence in assignments.values())
+    except Exception:
+        pass
+    values = {v for v in values if v}
+    return sorted(values, key=normalize_key) or ["Bourg Achard", "Harfleur", "Maromme", "YVETOT"]
+
+
+def build_evp_auto_maps(df_vendeurs, df_directeurs):
+    vendeurs_map = {}
+    if df_vendeurs is not None and not df_vendeurs.empty:
+        for _, vendeur in df_vendeurs.iterrows():
+            nom = vendeur.get("Commercial", "")
+            if is_excluded_from_evp(nom):
+                continue
+            key = resolve_nom_evp(nom)
+            vendeurs_map[key] = {
+                "Total vente HT": round(to_float(vendeur.get("ca_ok", 0)), 2),
+                "taux": round(to_float(vendeur.get("commission_pct", 0)) / 100, 4),
+                "Montant": round(to_float(vendeur.get("commission_eur", 0)), 2),
+                "décommission": round(to_float(vendeur.get("points_perdus", 0)) / 100, 4),
+            }
+
+    directeurs_map = {}
+    if df_directeurs is not None and not df_directeurs.empty:
+        for _, directeur in df_directeurs.iterrows():
+            key = resolve_nom_evp(directeur.get("directeur", ""))
+            directeurs_map[key] = round(to_float(directeur.get("commission_magasin_eur", 0)), 2)
+
+    return vendeurs_map, directeurs_map
+
+
+def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
+    period_key = evp_period_key_from_periode(periode)
+    selected_period_key = clean_visible(st.session_state.get("evp_selected_month", "")) or period_key
+    period_key = selected_period_key
+    saved_by_period = settings.get("evp_paie_data", {})
+    saved_rows = saved_by_period.get(period_key, {}) if isinstance(saved_by_period, dict) else {}
+    overrides_by_period = settings.get("evp_paie_overrides", {})
+    override_rows = overrides_by_period.get(period_key, {}) if isinstance(overrides_by_period, dict) else {}
+    personnel = get_evp_seed_rows(period_key)
+    excluded_keys = get_evp_excluded_keys(settings, period_key)
+    vendeurs_map, directeurs_map = build_evp_auto_maps(df_vendeurs, df_directeurs)
+    apply_auto_commissions = period_key == evp_period_key_from_periode(periode)
+
+    known_keys = {resolve_nom_evp(row.get("NOM_PRENOM", "")) for row in personnel}
+    if apply_auto_commissions:
+        for key, auto_values in vendeurs_map.items():
+            if key not in known_keys and key not in excluded_keys:
+                personnel.append({
+                    "Affectation": "",
+                    "NOM_PRENOM": auto_values.get("NOM_PRENOM", key.title()),
+                    "Contrat": "",
+                    "Salaire Fixe": ""
+                })
+                known_keys.add(key)
+
+    if isinstance(saved_rows, dict):
+        for key, saved in saved_rows.items():
+            if key not in known_keys and key not in excluded_keys and isinstance(saved, dict):
+                personnel.append({
+                    "Affectation": saved.get("Affectation", ""),
+                    "NOM_PRENOM": saved.get("NOM_PRENOM", key.title()),
+                    "Contrat": saved.get("Contrat", ""),
+                    "Salaire Fixe": saved.get("Salaire Fixe", "")
+                })
+                known_keys.add(key)
+
+    rows = []
+    for base in personnel:
+        nom = clean_visible(base.get("NOM_PRENOM", ""))
+        if not nom:
+            continue
+        key = resolve_nom_evp(nom)
+        if key in excluded_keys:
+            continue
+        manual = saved_rows.get(key, {}) if isinstance(saved_rows, dict) else {}
+        auto = vendeurs_map.get(key, {}) if apply_auto_commissions else {}
+
+        row = {header: "" for header in EVP_HEADERS}
+        row["Affectation"] = clean_visible(manual.get("Affectation", base.get("Affectation", "")))
+        row["NOM_PRENOM"] = clean_visible(manual.get("NOM_PRENOM", nom))
+        row["Contrat"] = clean_visible(manual.get("Contrat", base.get("Contrat", "")))
+        row["Salaire Fixe"] = manual.get("Salaire Fixe", base.get("Salaire Fixe", ""))
+
+        for col in EVP_MANUAL_COLUMNS:
+            if col in manual:
+                row[col] = manual.get(col, "")
+            elif col in base:
+                row[col] = base.get(col, "")
+
+        for col in ["Total vente HT", "taux", "Montant", "décommission"]:
+            row[col] = auto.get(col, base.get(col, ""))
+
+        comm_magasin = directeurs_map.get(key, 0) if apply_auto_commissions else 0
+        row["Comm. Magasin"] = comm_magasin if comm_magasin else base.get("Comm. Magasin", "")
+
+        acompte = to_float(row.get("Acompte versé", 0))
+        reprise = to_float(row.get("Acompte a reprendre", 0))
+        row["Solde acompte après reprise"] = round(acompte - reprise, 2) if acompte or reprise else base.get("Solde acompte après reprise", "")
+        overrides = override_rows.get(key, {}) if isinstance(override_rows, dict) else {}
+        if isinstance(overrides, dict):
+            for col in EVP_AUTO_COLUMNS:
+                if col in overrides:
+                    row[col] = overrides.get(col, "")
+        rows.append(row)
+
+    df = pd.DataFrame(rows, columns=EVP_HEADERS)
+    if not df.empty:
+        df["_sort_agence"] = df["Affectation"].apply(normalize_key)
+        df["_sort_nom"] = df["NOM_PRENOM"].apply(normalize_key)
+        df = df.sort_values(["_sort_agence", "_sort_nom"]).drop(columns=["_sort_agence", "_sort_nom"])
+    return df.reset_index(drop=True), period_key
+
+
+def prepare_evp_editor_dataframe(df):
+    editor_df = df.copy()
+    editor_df = editor_df.replace({None: "", np.nan: ""})
+    for col in EVP_NUMERIC_COLUMNS:
+        if col not in editor_df.columns:
+            continue
+        formatted_values = []
+        for value in editor_df[col]:
+            if pd.isna(value) or clean_visible(value).lower() in {"", "none", "nan"}:
+                formatted_values.append("")
+                continue
+            number = to_float(value, default=np.nan)
+            if pd.isna(number):
+                formatted_values.append("")
+            elif col in EVP_PERCENT_COLUMNS:
+                formatted_values.append(f"{number * 100:.2f} %")
+            else:
+                formatted_values.append(f"{number:.2f} €")
+        editor_df[col] = formatted_values
+    return editor_df
+
+
+def parse_evp_editor_number(value):
+    if pd.isna(value):
+        return ""
+    text = clean_visible(value)
+    if text.lower() in {"", "none", "nan"}:
+        return ""
+    text = (
+        text.replace("€", "")
+        .replace("%", "")
+        .replace(chr(160), " ")
+        .replace(" ", "")
+        .replace(",", ".")
+    )
+    try:
+        return float(text)
+    except Exception:
+        return ""
+
+
+def normalize_evp_editor_dataframe(edited_df):
+    storage_df = edited_df.copy()
+    storage_df = storage_df.replace({None: "", np.nan: ""})
+    for col in EVP_NUMERIC_COLUMNS:
+        if col not in storage_df.columns:
+            continue
+        values = storage_df[col].apply(parse_evp_editor_number)
+        if col in EVP_PERCENT_COLUMNS:
+            values = values.apply(lambda value: value / 100 if value != "" else "")
+        storage_df[col] = values
+    return storage_df
+
+
+def evp_values_different(left, right):
+    left_blank = pd.isna(left) or clean_visible(left) == ""
+    right_blank = pd.isna(right) or clean_visible(right) == ""
+    if left_blank and right_blank:
+        return False
+    if left_blank != right_blank:
+        return True
+    try:
+        return abs(float(left) - float(right)) > 0.0001
+    except Exception:
+        return clean_visible(left) != clean_visible(right)
+
+
+def get_evp_auto_changes(original_df, edited_storage_df):
+    if original_df is None or original_df.empty or edited_storage_df is None or edited_storage_df.empty:
+        return []
+    original_by_key = {
+        resolve_nom_evp(row.get("NOM_PRENOM", "")): row
+        for _, row in original_df.iterrows()
+        if clean_visible(row.get("NOM_PRENOM", ""))
+    }
+    changes = []
+    for _, row in edited_storage_df.iterrows():
+        nom = clean_visible(row.get("NOM_PRENOM", ""))
+        key = resolve_nom_evp(nom)
+        original = original_by_key.get(key)
+        if original is None:
+            continue
+        for col in EVP_AUTO_COLUMNS:
+            if col in edited_storage_df.columns and evp_values_different(row.get(col, ""), original.get(col, "")):
+                changes.append(f"{nom} / {col}")
+    return changes
+
+
+def save_evp_manual_dataframe(settings, period_key, edited_df, original_df=None):
+    edited_df = normalize_evp_editor_dataframe(edited_df)
+    edited_df = edited_df.copy()
+    evp_data = settings.get("evp_paie_data", {})
+    if not isinstance(evp_data, dict):
+        evp_data = {}
+    overrides_data = settings.get("evp_paie_overrides", {})
+    if not isinstance(overrides_data, dict):
+        overrides_data = {}
+    period_data = {}
+    period_overrides = {}
+    original_by_key = {}
+    if original_df is not None and not original_df.empty:
+        original_by_key = {
+            resolve_nom_evp(row.get("NOM_PRENOM", "")): row
+            for _, row in original_df.iterrows()
+            if clean_visible(row.get("NOM_PRENOM", ""))
+        }
+
+    for _, row in edited_df.iterrows():
+        nom = clean_visible(row.get("NOM_PRENOM", ""))
+        if not nom:
+            continue
+        key = resolve_nom_evp(nom)
+        manual = {
+            "Affectation": clean_visible(row.get("Affectation", "")),
+            "NOM_PRENOM": nom,
+            "Contrat": clean_visible(row.get("Contrat", "")),
+        }
+        for col in EVP_MANUAL_COLUMNS:
+            value = row.get(col, "")
+            if pd.isna(value):
+                value = ""
+            manual[col] = value
+        period_data[key] = manual
+        original = original_by_key.get(key)
+        row_overrides = {}
+        if original is not None:
+            for col in EVP_AUTO_COLUMNS:
+                value = row.get(col, "")
+                if pd.isna(value):
+                    value = ""
+                if evp_values_different(value, original.get(col, "")):
+                    row_overrides[col] = value
+        if row_overrides:
+            row_overrides["NOM_PRENOM"] = nom
+            period_overrides[key] = row_overrides
+
+    evp_data[period_key] = period_data
+    overrides_data[period_key] = period_overrides
+    settings["evp_paie_data"] = evp_data
+    settings["evp_paie_overrides"] = overrides_data
+    settings["evp_paie_updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def evp_cell_value(value):
+    if pd.isna(value):
+        return ""
+    if isinstance(value, str) and value.strip().lower() in {"none", "nan"}:
+        return ""
+    return value
+
+
+def create_evp_manager_workbook(df, period_key):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = safe_filename(period_key)[:31] or "EVP"
+
+    header_fill = PatternFill("solid", fgColor="156D86")
+    row_fill = PatternFill("solid", fgColor="BFEAF4")
+    white_font = Font(color="FFFFFF", bold=True)
+    thin = Side(style="thin", color="7DC8D8")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.append(EVP_HEADERS)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = white_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for _, row in df.iterrows():
+        ws.append([evp_cell_value(row.get(col, "")) for col in EVP_HEADERS])
+
+    for row_idx in range(2, ws.max_row + 1):
+        if row_idx % 2 == 0:
+            for cell in ws[row_idx]:
+                cell.fill = row_fill
+        for col_idx in range(1, len(EVP_HEADERS) + 1):
+            ws.cell(row_idx, col_idx).border = border
+            ws.cell(row_idx, col_idx).alignment = Alignment(vertical="center", wrap_text=True)
+        ws.cell(row_idx, 19).value = f"=D{row_idx}-R{row_idx}"
+
+    euro_cols = [4, 5, 7, 9, 10, 11, 17, 18, 19]
+    pct_cols = [6, 8]
+    for row_idx in range(2, ws.max_row + 1):
+        for col_idx in euro_cols:
+            ws.cell(row_idx, col_idx).number_format = '#,##0.00 €'
+        for col_idx in pct_cols:
+            ws.cell(row_idx, col_idx).number_format = '0.00%'
+
+    widths = {
+        1: 16, 2: 24, 3: 12, 4: 14, 5: 16, 6: 10, 7: 14, 8: 13, 9: 14, 10: 14,
+        11: 14, 12: 18, 13: 18, 14: 24, 15: 12, 16: 12, 17: 14, 18: 18, 19: 20
+    }
+    for col_idx, width in widths.items():
+        ws.column_dimensions[ws.cell(1, col_idx).column_letter].width = width
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def save_periode(periode, data):
     file_path = HISTORIQUE_DIR / f"{safe_filename(periode)}.pkl"
     with open(file_path, "wb") as f:
@@ -3230,48 +3711,14 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
 
     if role == "admin" and st.session_state.get("df_vendeurs") is not None:
         st.divider()
-        st.caption("📊 Mise à jour EVP mensuelle")
+        st.caption("💼 EVP / Paie")
 
         periode_tools = st.session_state.get("periode", "Mois inconnu")
         df_vendeurs_tools = st.session_state.get("df_vendeurs", pd.DataFrame())
         df_agences_tools = st.session_state.get("df_agences", pd.DataFrame())
-        df_directeurs_tools = st.session_state.get("df_directeurs", pd.DataFrame())
         target_sheet_evp = sheet_name_evp_for_next_month(periode_tools)
         st.caption(f"{periode_tools} → EVP {target_sheet_evp or 'à déterminer'}")
-
-        evp_file = st.file_uploader(
-            "Uploader EVP mensuelle.xlsx",
-            type=["xlsx"],
-            key=f"sidebar_evp_upload_{safe_filename(periode_tools)}"
-        )
-
-        if evp_file:
-            try:
-                evp_bytes, evp_error, evp_absents = update_evp_workbook(
-                    evp_file,
-                    df_vendeurs_tools,
-                    df_directeurs_tools,
-                    periode_tools
-                )
-
-                if evp_error:
-                    st.error(f"❌ {evp_error}")
-                else:
-                    st.download_button(
-                        "📥 Télécharger EVP",
-                        evp_bytes,
-                        f"EVP_mensuelle_mis_a_jour_{safe_filename(periode_tools)}.xlsx",
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"sidebar_evp_download_{safe_filename(periode_tools)}",
-                        on_click="ignore"
-                    )
-
-                    if evp_absents:
-                        st.warning("Noms absents EVP : " + ", ".join(evp_absents))
-                    else:
-                        st.success("EVP prêt ✅")
-            except Exception as exc:
-                st.error(f"❌ EVP impossible : {exc}")
+        st.caption("Ouvre l'onglet 💼 EVP / Paie pour saisir et télécharger le fichier comptable.")
 
         st.divider()
         st.caption("📦 Exports PDF groupés")
@@ -4342,6 +4789,208 @@ def afficher_dossiers_en_attente(tab):
                 )
 
 
+def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
+    with tab:
+        st.subheader("💼 EVP / éléments de paie")
+        st.caption(
+            "Version test : Manager prépare directement le tableau EVP. "
+            "Les commissions sont automatiques, les autres éléments restent saisissables."
+        )
+
+        periode_evp = st.session_state.get("periode", "Mois inconnu")
+        settings = load_settings()
+
+        month_options = get_evp_month_options()
+        default_month = evp_period_key_from_periode(periode_evp)
+        default_index = month_options.index(default_month) if default_month in month_options else 0
+        selected_month = st.selectbox(
+            "Mois EVP",
+            month_options,
+            index=default_index,
+            key="evp_selected_month"
+        )
+        evp_df, period_key = build_evp_manager_dataframe(
+            settings,
+            periode_evp,
+            df_vendeurs_source,
+            df_directeurs_source
+        )
+
+        target_auto_month = evp_period_key_from_periode(periode_evp)
+        if selected_month == target_auto_month:
+            st.info(f"Commissions automatiques depuis {periode_evp} → EVP {period_key}")
+        else:
+            st.info(f"EVP {period_key} chargé depuis les données sauvegardées. Les commissions automatiques correspondent à {target_auto_month}.")
+
+        if evp_df.empty:
+            st.warning("Aucune ligne personnel disponible pour l'EVP.")
+            evp_df = pd.DataFrame(columns=EVP_HEADERS)
+
+        with st.expander("👥 Gérer le personnel EVP", expanded=False):
+            st.caption("Ajoute ou retire des personnes de la base EVP Manager. Les suppressions sont mémorisées.")
+            agence_options = get_evp_affectation_options(settings)
+
+            with st.form(key=f"add_evp_personnel_{safe_filename(period_key)}"):
+                a1, a2, a3, a4 = st.columns([1.2, 2, 1, 1])
+                new_affectation = a1.selectbox("Affectation", agence_options)
+                new_nom = a2.text_input("Nom prénom", placeholder="DUPONT Marie")
+                new_contrat = a3.text_input("Contrat", placeholder="CDI")
+                new_salaire = a4.number_input("Salaire fixe", min_value=0.0, value=0.0, step=50.0, format="%.2f")
+                add_person = st.form_submit_button("➕ Ajouter")
+
+            if add_person:
+                nom_clean = clean_visible(new_nom)
+                if not nom_clean:
+                    st.error("Le nom/prénom est obligatoire.")
+                else:
+                    settings_add = load_settings()
+                    key = resolve_nom_evp(nom_clean)
+                    existing_keys = {resolve_nom_evp(row.get("NOM_PRENOM", "")) for _, row in evp_df.iterrows()}
+                    if key in existing_keys:
+                        st.error("Cette personne existe déjà dans la base EVP.")
+                    else:
+                        evp_data = settings_add.get("evp_paie_data", {})
+                        if not isinstance(evp_data, dict):
+                            evp_data = {}
+                        period_data = evp_data.get(period_key, {})
+                        if not isinstance(period_data, dict):
+                            period_data = {}
+                        period_data[key] = {
+                            "Affectation": clean_visible(new_affectation),
+                            "NOM_PRENOM": nom_clean,
+                            "Contrat": clean_visible(new_contrat),
+                            "Salaire Fixe": new_salaire if new_salaire else ""
+                        }
+                        evp_data[period_key] = period_data
+                        settings_add["evp_paie_data"] = evp_data
+                        excluded = get_evp_excluded_keys(settings_add, period_key)
+                        excluded.discard(key)
+                        set_evp_excluded_keys(settings_add, period_key, excluded)
+                        save_settings(settings_add)
+                        st.success("Personnel ajouté ✅")
+                        st.rerun()
+
+            delete_options = [
+                f"{row.get('NOM_PRENOM', '')} — {row.get('Affectation', '')}"
+                for _, row in evp_df.iterrows()
+                if clean_visible(row.get("NOM_PRENOM", ""))
+            ]
+            delete_map = {
+                f"{row.get('NOM_PRENOM', '')} — {row.get('Affectation', '')}": resolve_nom_evp(row.get("NOM_PRENOM", ""))
+                for _, row in evp_df.iterrows()
+                if clean_visible(row.get("NOM_PRENOM", ""))
+            }
+            selected_delete = st.multiselect("Personnel à supprimer", delete_options, key=f"delete_evp_personnel_select_{safe_filename(period_key)}")
+            if st.button("🗑️ Supprimer la sélection", key=f"delete_evp_personnel_{safe_filename(period_key)}"):
+                keys_to_delete = {delete_map[label] for label in selected_delete if label in delete_map}
+                if not keys_to_delete:
+                    st.warning("Sélectionne au moins une personne à supprimer.")
+                else:
+                    settings_del = load_settings()
+                    evp_data = settings_del.get("evp_paie_data", {})
+                    if isinstance(evp_data, dict):
+                        period_data = evp_data.get(period_key, {})
+                        if isinstance(period_data, dict):
+                            for key in keys_to_delete:
+                                period_data.pop(key, None)
+                            evp_data[period_key] = period_data
+                    excluded = get_evp_excluded_keys(settings_del, period_key)
+                    excluded.update(keys_to_delete)
+                    set_evp_excluded_keys(settings_del, period_key, excluded)
+                    settings_del["evp_paie_data"] = evp_data
+                    save_settings(settings_del)
+                    st.success("Personnel supprimé ✅")
+                    st.rerun()
+
+        column_config = {
+            "Affectation": st.column_config.SelectboxColumn("Affectation", options=get_evp_affectation_options(settings)),
+            "Acompte versé": st.column_config.TextColumn("Acompte versé"),
+            "Total vente HT": st.column_config.TextColumn("Total vente HT"),
+            "taux": st.column_config.TextColumn("taux %"),
+            "Montant": st.column_config.TextColumn("Montant"),
+            "décommission": st.column_config.TextColumn("décommission %"),
+            "Comm. Equipe": st.column_config.TextColumn("Comm. Equipe"),
+            "Comm. Magasin": st.column_config.TextColumn("Comm. Magasin"),
+            "P. annuelle": st.column_config.TextColumn("P. annuelle"),
+            "Salaire Fixe": st.column_config.TextColumn("Salaire Fixe"),
+            "Acompte a reprendre": st.column_config.TextColumn("Acompte a reprendre"),
+            "Solde acompte après reprise": st.column_config.TextColumn("Solde acompte après reprise"),
+        }
+
+        editor_key = f"evp_paie_editor_{safe_filename(period_key)}"
+        editor_df = prepare_evp_editor_dataframe(evp_df)
+        edited_df = st.data_editor(
+            editor_df,
+            key=editor_key,
+            use_container_width=True,
+            height=650,
+            num_rows="fixed",
+            column_config=column_config
+        )
+        edited_storage_df = normalize_evp_editor_dataframe(edited_df)
+        auto_changes = get_evp_auto_changes(evp_df, edited_storage_df)
+        confirm_auto_changes = True
+        if auto_changes:
+            preview_changes = ", ".join(auto_changes[:5])
+            if len(auto_changes) > 5:
+                preview_changes += f"… (+{len(auto_changes) - 5})"
+            st.warning(
+                "Tu as modifié une ou plusieurs colonnes calculées automatiquement : "
+                f"{preview_changes}. Ces valeurs remplaceront le calcul automatique pour cet EVP."
+            )
+            confirm_auto_changes = st.checkbox(
+                "Je confirme vouloir modifier manuellement les champs automatiques",
+                key=f"confirm_evp_auto_changes_{safe_filename(period_key)}"
+            )
+
+        b1, b2, b3 = st.columns([1, 1, 2])
+        with b1:
+            if st.button("💾 Enregistrer EVP", type="primary", key=f"save_evp_paie_{safe_filename(period_key)}"):
+                if auto_changes and not confirm_auto_changes:
+                    st.error("Confirme la modification des champs automatiques avant d'enregistrer.")
+                else:
+                    save_evp_manual_dataframe(settings, period_key, edited_df, evp_df)
+                    save_settings(settings)
+                    st.success("EVP sauvegardé dans Manager ✅")
+                    st.rerun()
+
+        refreshed_df, _ = build_evp_manager_dataframe(settings, periode_evp, df_vendeurs_source, df_directeurs_source)
+        xlsx_bytes = create_evp_manager_workbook(refreshed_df, period_key)
+        filename = f"EVP_elements_paie_{safe_filename(period_key)}.xlsx"
+
+        with b2:
+            st.download_button(
+                "📥 Télécharger Excel",
+                xlsx_bytes,
+                filename,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"download_evp_paie_{safe_filename(period_key)}",
+                on_click="ignore"
+            )
+
+        with b3:
+            settings_mail = load_settings()
+            recipients = st.text_input(
+                "Mail comptable",
+                value=clean_visible(settings_mail.get("evp_comptable_recipients", "")),
+                placeholder="comptable@..."
+            )
+            if recipients != clean_visible(settings_mail.get("evp_comptable_recipients", "")):
+                settings_mail["evp_comptable_recipients"] = clean_visible(recipients)
+                save_settings(settings_mail)
+
+            subject = f"Éléments de paie EVP - {period_key}"
+            body = (
+                "Bonjour,\n\n"
+                f"Vous trouverez en pièce jointe le tableau EVP des éléments de paie pour {period_key}.\n\n"
+                "Le fichier a été préparé depuis Manager EcoHabitat avec les commissions vendeurs et commissions magasin calculées automatiquement.\n\n"
+                "Bonne réception,\nEcoHabitat"
+            )
+            mailto_url = f"mailto:{quote(clean_visible(recipients), safe='@.;,')}?subject={quote(subject)}&body={quote(body)}"
+            st.link_button("📧 Préparer le mail comptable", mailto_url)
+            st.caption("Le navigateur prépare le mail. Il faut joindre l'Excel téléchargé au message.")
+
+
 # ====================== AFFICHAGE DONNÉES ======================
 
 if st.session_state.get("df_vendeurs") is not None:
@@ -4499,6 +5148,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "🏢 Par Agence",
             "👔 Directeurs",
             "📋 Listes complètes",
+            "💼 EVP / Paie",
             "⚙️ Utilisateurs"
         ]
         active_page = st.pills(
@@ -4532,7 +5182,8 @@ if st.session_state.get("df_vendeurs") is not None:
 
     elif role == "secretaire":
         pages = [
-            "⏳ En attente"
+            "⏳ En attente",
+            "💼 EVP / Paie"
         ]
         active_page = st.pills(
             "Navigation",
@@ -5225,6 +5876,8 @@ if st.session_state.get("df_vendeurs") is not None:
 
         if active_page == "⏳ En attente":
             afficher_dossiers_en_attente(st.container())
+        if active_page == "💼 EVP / Paie":
+            afficher_evp_paie(st.container(), df_vendeurs_all, df_directeurs)
         if active_page == "📆 Annuel":
             afficher_annuel(st.container())
         if active_page == "👤 Par Vendeur":
@@ -5284,7 +5937,10 @@ if st.session_state.get("df_vendeurs") is not None:
             afficher_annuel(st.container())
 
     elif role == "secretaire":
-        afficher_dossiers_en_attente(st.container())
+        if active_page == "⏳ En attente":
+            afficher_dossiers_en_attente(st.container())
+        if active_page == "💼 EVP / Paie":
+            afficher_evp_paie(st.container(), df_vendeurs_all, df_directeurs)
 
 else:
     periodes_main = sorted(list_periodes(), key=periode_sort_key)
