@@ -225,7 +225,8 @@ button[data-baseweb="tab"][aria-selected="true"] {
 }
 
 /* BOUTONS */
-.stButton > button {
+.stButton > button,
+[data-testid="stFormSubmitButton"] > button {
     border-radius: 10px;
     font-weight: 600;
     background: #FFFFFF !important;
@@ -233,21 +234,43 @@ button[data-baseweb="tab"][aria-selected="true"] {
     border: 1px solid #D1D5DB !important;
 }
 
-.stButton > button:hover {
+.stButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover {
     background: #F6F8F4 !important;
     color: #1F2933 !important;
     border-color: #66B32E !important;
 }
 
-.stButton > button[kind="primary"] {
+.stButton > button[kind="primary"],
+[data-testid="stFormSubmitButton"] > button[kind="primary"] {
     background-color: #66B32E !important;
     color: white !important;
     border-color: #66B32E !important;
 }
 
-.stButton > button[kind="primary"]:hover {
+.stButton > button[kind="primary"]:hover,
+[data-testid="stFormSubmitButton"] > button[kind="primary"]:hover {
     background-color: #4F9A23 !important;
     color: white !important;
+}
+
+[data-testid="stFormSubmitButton"] button {
+    background-color: #66B32E !important;
+    color: #FFFFFF !important;
+    border: 1px solid #66B32E !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    opacity: 1 !important;
+}
+
+[data-testid="stFormSubmitButton"] button:hover {
+    background-color: #4F9A23 !important;
+    color: #FFFFFF !important;
+    border-color: #4F9A23 !important;
+}
+
+[data-testid="stFormSubmitButton"] button * {
+    color: #FFFFFF !important;
 }
 
 /* ALERTES */
@@ -3100,7 +3123,8 @@ if not st.session_state.logged_in:
         }}
 
         [data-testid="stTextInput"],
-        [data-testid="stButton"] {{
+        [data-testid="stButton"],
+        [data-testid="stFormSubmitButton"] {{
             position: relative;
             z-index: 4;
         }}
@@ -3120,9 +3144,11 @@ if not st.session_state.logged_in:
         unsafe_allow_html=True
     )
 
-    username = st.text_input("Identifiant")
-    password = st.text_input("Mot de passe", type="password")
-    totp_code = st.text_input("Code Authenticator", max_chars=6, help="À renseigner uniquement si la 2FA est activée.")
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("Identifiant")
+        password = st.text_input("Mot de passe", type="password")
+        totp_code = st.text_input("Code Authenticator", max_chars=6, help="À renseigner uniquement si la 2FA est activée.")
+        login_submitted = st.form_submit_button("Se connecter", type="primary")
 
     pending_2fa_user = st.session_state.get("pending_2fa_setup_user")
     if pending_2fa_user:
@@ -3156,7 +3182,7 @@ if not st.session_state.logged_in:
         else:
             st.session_state.pop("pending_2fa_setup_user", None)
 
-    if st.button("Se connecter", type="primary"):
+    if login_submitted:
         remaining_lock = get_login_lock_remaining()
 
         if remaining_lock > 0:
@@ -4920,18 +4946,25 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                     st.rerun()
 
         column_config = {
-            "Affectation": st.column_config.SelectboxColumn("Affectation", options=get_evp_affectation_options(settings)),
-            "Acompte versé": st.column_config.TextColumn("Acompte versé"),
-            "Total vente HT": st.column_config.TextColumn("Total vente HT"),
-            "taux": st.column_config.TextColumn("taux %"),
-            "Montant": st.column_config.TextColumn("Montant"),
-            "décommission": st.column_config.TextColumn("décommission %"),
-            "Comm. Equipe": st.column_config.TextColumn("Comm. Equipe"),
-            "Comm. Magasin": st.column_config.TextColumn("Comm. Magasin"),
-            "P. annuelle": st.column_config.TextColumn("P. annuelle"),
-            "Salaire Fixe": st.column_config.TextColumn("Salaire Fixe"),
-            "Acompte a reprendre": st.column_config.TextColumn("Acompte a reprendre"),
-            "Solde acompte après reprise": st.column_config.TextColumn("Solde acompte après reprise"),
+            "Affectation": st.column_config.SelectboxColumn("Affectation", options=get_evp_affectation_options(settings), width=105),
+            "NOM_PRENOM": st.column_config.TextColumn("NOM_PRENOM", width=150),
+            "Contrat": st.column_config.TextColumn("Contrat", width=62),
+            "Acompte versé": st.column_config.TextColumn("Acompte versé", width=105),
+            "Total vente HT": st.column_config.TextColumn("Total vente HT", width=110),
+            "taux": st.column_config.TextColumn("taux %", width=72),
+            "Montant": st.column_config.TextColumn("Montant", width=92),
+            "décommission": st.column_config.TextColumn("décomm. %", width=90),
+            "Comm. Equipe": st.column_config.TextColumn("Comm. Equipe", width=105),
+            "Comm. Magasin": st.column_config.TextColumn("Comm. Magasin", width=112),
+            "P. annuelle": st.column_config.TextColumn("P. annuelle", width=95),
+            "dates absence": st.column_config.TextColumn("dates absence", width=170),
+            "motif absence": st.column_config.TextColumn("motif absence", width=160),
+            "Autre": st.column_config.TextColumn("Autre", width=190),
+            "Mutuelle": st.column_config.TextColumn("Mutuelle", width=72),
+            "SAISIE/SAL.": st.column_config.TextColumn("SAISIE/SAL.", width=88),
+            "Salaire Fixe": st.column_config.TextColumn("Salaire Fixe", width=95),
+            "Acompte a reprendre": st.column_config.TextColumn("Acompte reprise", width=112),
+            "Solde acompte après reprise": st.column_config.TextColumn("Solde acompte", width=112),
         }
 
         editor_key = f"evp_paie_editor_{safe_filename(period_key)}"
@@ -4942,6 +4975,7 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
             use_container_width=True,
             height=650,
             num_rows="fixed",
+            hide_index=True,
             column_config=column_config
         )
         edited_storage_df = normalize_evp_editor_dataframe(edited_df)
@@ -4987,25 +5021,27 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
 
         with b3:
             settings_mail = load_settings()
-            recipients = st.text_input(
-                "Mail comptable",
-                value=clean_visible(settings_mail.get("evp_comptable_recipients", "")),
-                placeholder="comptable@..."
-            )
-            if recipients != clean_visible(settings_mail.get("evp_comptable_recipients", "")):
-                settings_mail["evp_comptable_recipients"] = clean_visible(recipients)
-                save_settings(settings_mail)
-
+            saved_recipients = clean_visible(settings_mail.get("evp_comptable_recipients", ""))
+            active_recipients = clean_visible(st.session_state.get("evp_comptable_recipients_live", saved_recipients))
             subject = f"Éléments de paie EVP - {period_key}"
             body = (
                 "Bonjour,\n\n"
                 f"Vous trouverez en pièce jointe le tableau EVP des éléments de paie pour {period_key}.\n\n"
-                "Le fichier a été préparé depuis Manager EcoHabitat avec les commissions vendeurs et commissions magasin calculées automatiquement.\n\n"
                 "Bonne réception,\nEcoHabitat"
             )
-            mailto_url = f"mailto:{quote(clean_visible(recipients), safe='@.;,')}?subject={quote(subject)}&body={quote(body)}"
-            st.link_button("📧 Préparer le mail comptable", mailto_url)
-            st.caption("Le navigateur prépare le mail. Il faut joindre l'Excel téléchargé au message.")
+            mailto_url = f"mailto:{quote(active_recipients, safe='@.;,')}?subject={quote(subject)}&body={quote(body)}"
+            st.link_button("📧 Préparer le mail", mailto_url)
+            with st.expander("📧 Mail comptable", expanded=False):
+                recipients = st.text_input(
+                    "Destinataire",
+                    value=saved_recipients,
+                    placeholder="Optionnel",
+                    key="evp_comptable_recipients_live"
+                )
+                if recipients != saved_recipients:
+                    settings_mail["evp_comptable_recipients"] = clean_visible(recipients)
+                    save_settings(settings_mail)
+                st.caption("Optionnel : le mail s'ouvre dans le logiciel par défaut. Il faut joindre l'Excel téléchargé.")
 
 
 # ====================== AFFICHAGE DONNÉES ======================
