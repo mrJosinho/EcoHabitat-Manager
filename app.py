@@ -656,14 +656,161 @@ def get_commercial_agence_assignments(settings=None):
     return assignments if isinstance(assignments, dict) else {}
 
 
-def get_assigned_commercial_keys_for_agence(agence, settings=None):
+def get_commercial_agence_assignment_history(settings=None):
+    settings = settings if isinstance(settings, dict) else load_settings()
+    history = settings.get("commercial_agence_assignment_history", {})
+    return history if isinstance(history, dict) else {}
+
+
+def period_to_effective_key(periode):
+    mois, annee = periode_to_month_year(periode)
+    if not mois or not annee:
+        return ""
+    return f"{annee:04d}-{mois:02d}"
+
+
+def get_commercial_agence_assignments_for_period(settings=None, periode=None):
+    settings = settings if isinstance(settings, dict) else load_settings()
+    assignments = get_commercial_agence_assignments(settings).copy()
+    period_key = period_to_effective_key(periode)
+    if not period_key:
+        return assignments
+
+    history = get_commercial_agence_assignment_history(settings)
+    for commercial, changes in history.items():
+        if not isinstance(changes, list):
+            continue
+        valid_changes = [
+            change for change in changes
+            if isinstance(change, dict)
+            and clean_visible(change.get("from", "")) <= period_key
+        ]
+        if valid_changes:
+            latest = sorted(valid_changes, key=lambda change: clean_visible(change.get("from", "")))[-1]
+            latest_agence = clean_visible(latest.get("agence", "")).upper()
+            if latest_agence:
+                assignments[commercial] = latest_agence
+            else:
+                for existing_commercial in list(assignments.keys()):
+                    if normalize_key(existing_commercial) == normalize_key(commercial):
+                        assignments.pop(existing_commercial, None)
+    return assignments
+
+
+def get_assigned_commercial_keys_for_agence(agence, settings=None, periode=None):
     agence_key = normalize_key(agence)
-    assignments = get_commercial_agence_assignments(settings)
+    assignments = get_commercial_agence_assignments_for_period(settings, periode)
     return {
         normalize_key(commercial)
         for commercial, assigned_agence in assignments.items()
         if normalize_key(assigned_agence) == agence_key
     }
+
+
+def get_user_agences(user):
+    if not isinstance(user, dict):
+        return []
+
+    raw_agences = user.get("agences")
+    if raw_agences is None:
+        raw_agences = user.get("agence", "")
+
+    if isinstance(raw_agences, str):
+        parts = re.split(r"[,;/|]+", raw_agences)
+    elif isinstance(raw_agences, (list, tuple, set)):
+        parts = list(raw_agences)
+    else:
+        parts = [raw_agences]
+
+    agences = []
+    seen = set()
+    for part in parts:
+        agence = clean_visible(part).upper()
+        key = normalize_key(agence)
+        if key and key not in seen:
+            agences.append(agence)
+            seen.add(key)
+    return agences
+
+
+def user_agence_label(user):
+    agences = get_user_agences(user)
+    return " / ".join(agences)
+
+
+def get_assigned_commercial_keys_for_agences(agences, settings=None, periode=None):
+    assigned = set()
+    for agence in agences:
+        assigned.update(get_assigned_commercial_keys_for_agence(agence, settings, periode))
+    return assigned
+
+
+def user_has_agence(user, agence):
+    agence_key = normalize_key(agence)
+    return bool(agence_key) and agence_key in {normalize_key(a) for a in get_user_agences(user)}
+
+
+def user_has_agence_for_period(user, agence, periode):
+    agence_key = normalize_key(agence)
+    if not agence_key:
+        return False
+    if user.get("role") == "directeur_agence":
+        agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+    else:
+        agences = get_user_agences(user)
+    return agence_key in {normalize_key(a) for a in agences}
+
+
+def filter_df_by_user_agences(df, user, col_agence_name):
+    if df.empty or not col_agence_name or col_agence_name not in df.columns:
+        return df.copy()
+    agence_keys = {normalize_key(a) for a in get_user_agences(user)}
+    if not agence_keys:
+        return df.iloc[0:0].copy()
+    return df[df[col_agence_name].apply(normalize_key).isin(agence_keys)].copy()
+
+
+def filter_df_by_directeur_agences_for_period(df, user, col_agence_name, default_periode=None):
+    if df.empty or not col_agence_name or col_agence_name not in df.columns:
+        return df.copy()
+
+    def row_allowed(row):
+        row_periode = row.get("periode", default_periode) if hasattr(row, "get") else default_periode
+        agences = directeur_agences_for_period(user.get("nom", ""), row_periode, user)
+        agence_keys = {normalize_key(a) for a in agences}
+        return normalize_key(row.get(col_agence_name, "")) in agence_keys
+
+    return df[df.apply(row_allowed, axis=1)].copy()
+
+
+DEFAULT_AGENCE_OPTIONS = ["BOURG ACHARD", "HARFLEUR", "MAROMME", "YVETOT"]
+
+
+def get_available_agence_options(settings=None, users=None):
+    values = {normalize_key(a): clean_visible(a).upper() for a in DEFAULT_AGENCE_OPTIONS}
+
+    settings = settings if isinstance(settings, dict) else load_settings()
+    users = users if isinstance(users, dict) else load_users()
+
+    for assigned_agence in get_commercial_agence_assignments(settings).values():
+        key = normalize_key(assigned_agence)
+        if key:
+            values[key] = clean_visible(assigned_agence).upper()
+
+    for user_data in users.values():
+        for agence in get_user_agences(user_data):
+            key = normalize_key(agence)
+            if key:
+                values[key] = clean_visible(agence).upper()
+
+    df_agences_state = st.session_state.get("df_agences", pd.DataFrame())
+    if isinstance(df_agences_state, pd.DataFrame) and not df_agences_state.empty and "agence" in df_agences_state.columns:
+        for agence in df_agences_state["agence"].dropna().map(clean_visible).unique():
+            key = normalize_key(agence)
+            if key:
+                values[key] = clean_visible(agence).upper()
+
+    return sorted(values.values(), key=normalize_key)
 
 
 # ====================== MOTIFS D'ATTENTE ======================
@@ -1241,6 +1388,25 @@ def calculate_commission(ca_ok, remise_pct):
     return base, points, commission_pct, commission_euro
 
 
+def calculate_fixed_base_commission(ca_ok, remise_pct, base=10):
+    base = to_float(base)
+    if remise_pct <= 16:
+        points = 0
+    elif remise_pct > 25:
+        base = 0
+        points = 0
+    else:
+        points = int(np.floor(remise_pct - 15))
+
+    commission_pct = max(0, base - points)
+    commission_euro = round(ca_ok * commission_pct / 100, 2)
+    return base, points, commission_pct, commission_euro
+
+
+def is_nahim(nom):
+    return strip_accents(normalize_key(nom)) in ["EL GHAZOUANI NAHIM", "ELGHAZOUANI NAHIM"]
+
+
 def row_remise_pct(row, col_rem, col_catalogue):
     if not col_rem or col_rem not in row.index or not col_catalogue or col_catalogue not in row.index:
         return 0.0
@@ -1486,7 +1652,8 @@ def recompute_df_vendeurs_indicators(
     key_cols,
     col_client=None,
     col_agence=None,
-    col_ca_magasin=None
+    col_ca_magasin=None,
+    periode=None
 ):
     if df_vendeurs.empty:
         return df_vendeurs
@@ -1538,7 +1705,9 @@ def recompute_df_vendeurs_indicators(
         df_vendeurs.at[idx, "nb_opc_total"] = nb_opc_total
         df_vendeurs.at[idx, "ratio_opc_total_pct"] = ratio_opc_total
 
-        if is_responsable_agence(row.get("Commercial")):
+        commercial_name = row.get("Commercial")
+
+        if is_responsable_agence(commercial_name):
             ca_commissionnable_ok, base_comm, points, comm_def, euro = calculate_directeur_commission(
                 ok_detail,
                 col_vente,
@@ -1563,6 +1732,19 @@ def recompute_df_vendeurs_indicators(
                 col_rem,
                 col_catalogue
             )
+            if is_nahim(commercial_name):
+                nahim_remise_values = remises.get(k, {})
+                nahim_catalogue_hors_op = nahim_remise_values.get("ok_catalogue_hors_op", 0.0)
+                nahim_remise_hors_op = (
+                    nahim_remise_values.get("ok_rem_hors_op", 0.0) / nahim_catalogue_hors_op * 100
+                    if nahim_catalogue_hors_op > 0
+                    else 0.0
+                )
+                base_comm, points, comm_def, euro = calculate_fixed_base_commission(
+                    ca_commissionnable_ok,
+                    nahim_remise_hors_op,
+                    10
+                )
             df_vendeurs.at[idx, "base_commission_pct"] = base_comm
             df_vendeurs.at[idx, "points_perdus"] = points
             df_vendeurs.at[idx, "commission_pct"] = comm_def
@@ -1591,7 +1773,7 @@ def recompute_df_vendeurs_indicators(
             2
         ) if global_catalogue_hors_op > 0 else 0.0
 
-        if not is_responsable_agence(row.get("Commercial")):
+        if not is_responsable_agence(commercial_name):
             base_comm, points, comm_def, euro = calculate_commission(
                 ca_ok,
                 to_float(df_vendeurs.at[idx, "remise_hors_opc_pct"])
@@ -2344,6 +2526,42 @@ def evp_period_key_from_periode(periode):
     return target_sheet or clean_visible(periode) or "EVP"
 
 
+def evp_period_key_from_month_year(month, year):
+    mois_names = {
+        1: "JANVIER",
+        2: "FEVRIER",
+        3: "MARS",
+        4: "AVRIL",
+        5: "MAI",
+        6: "JUIN",
+        7: "JUILLET",
+        8: "AOUT",
+        9: "SEPTEMBRE",
+        10: "OCTOBRE",
+        11: "NOVEMBRE",
+        12: "DECEMBRE",
+    }
+    if not month or not year or month not in mois_names:
+        return ""
+    return f"{mois_names[month]} {year}"
+
+
+def add_months_to_month_year(month, year, offset):
+    if not month or not year:
+        return None, None
+    month_index = (year * 12) + (month - 1) + offset
+    new_year = month_index // 12
+    new_month = (month_index % 12) + 1
+    return new_month, new_year
+
+
+def evp_period_sort_key(period_key):
+    month, year = periode_to_month_year(period_key)
+    if month and year:
+        return (year, month, period_key)
+    return (9999, 99, period_key)
+
+
 @st.cache_data(show_spinner=False, max_entries=1)
 def load_evp_seed_data(file_mtime_ns):
     if not EVP_SEED_FILE.exists():
@@ -2361,12 +2579,45 @@ def get_evp_seed_data():
     return load_evp_seed_data(mtime)
 
 
-def get_evp_month_options():
+def get_evp_month_options(settings=None, periode=None, months_ahead=12):
+    settings = settings if isinstance(settings, dict) else load_settings()
     seed = get_evp_seed_data()
-    options = [m for m in seed.keys() if m != "MODELE"]
-    if options:
-        return options
-    return [sheet_name_evp_for_next_month(st.session_state.get("periode", "")) or "EVP"]
+    options = {m for m in seed.keys() if m != "MODELE"}
+
+    saved_by_period = settings.get("evp_paie_data", {})
+    if isinstance(saved_by_period, dict):
+        options.update(clean_visible(m) for m in saved_by_period.keys() if clean_visible(m))
+
+    overrides_by_period = settings.get("evp_paie_overrides", {})
+    if isinstance(overrides_by_period, dict):
+        options.update(clean_visible(m) for m in overrides_by_period.keys() if clean_visible(m))
+
+    source_periode = periode or st.session_state.get("periode", "")
+    default_month = evp_period_key_from_periode(source_periode)
+    if default_month:
+        options.add(default_month)
+
+    start_month, start_year = periode_to_month_year(default_month)
+    if not start_month or not start_year:
+        today = datetime.today()
+        start_month, start_year = today.month, today.year
+
+    for offset in range(0, months_ahead + 1):
+        future_month, future_year = add_months_to_month_year(start_month, start_year, offset)
+        future_key = evp_period_key_from_month_year(future_month, future_year)
+        if future_key:
+            options.add(future_key)
+
+    clean_options = [clean_visible(option) for option in options if clean_visible(option)]
+    return sorted(clean_options, key=evp_period_sort_key) or [default_month or "EVP"]
+
+
+def previous_commission_period_from_evp_key(period_key):
+    month, year = periode_to_month_year(period_key)
+    if not month or not year:
+        return ""
+    previous_month, previous_year = add_months_to_month_year(month, year, -1)
+    return evp_period_key_from_month_year(previous_month, previous_year).title()
 
 
 def get_evp_seed_rows(period_key):
@@ -2444,7 +2695,10 @@ def build_evp_auto_maps(df_vendeurs, df_directeurs):
     if df_directeurs is not None and not df_directeurs.empty:
         for _, directeur in df_directeurs.iterrows():
             key = resolve_nom_evp(directeur.get("directeur", ""))
-            directeurs_map[key] = round(to_float(directeur.get("commission_magasin_eur", 0)), 2)
+            directeurs_map[key] = round(
+                directeurs_map.get(key, 0) + to_float(directeur.get("commission_magasin_eur", 0)),
+                2
+            )
 
     return vendeurs_map, directeurs_map
 
@@ -2850,6 +3104,90 @@ def periode_to_month_year(periode):
 def periode_sort_key(periode):
     mois, annee = periode_to_month_year(periode)
     return (annee or 0, mois or 0)
+
+
+def periode_is_on_or_after(periode, year, month):
+    mois, annee = periode_to_month_year(periode)
+    if not mois or not annee:
+        return False
+    return (annee, mois) >= (year, month)
+
+
+def directeur_agences_for_period(nom, periode, user=None):
+    nom_key = strip_accents(normalize_key(nom))
+
+    if nom_key in ["EL GHAZOUANI NAHIM", "ELGHAZOUANI NAHIM"]:
+        return ["HARFLEUR", "MAROMME"] if periode_is_on_or_after(periode, 2026, 6) else ["HARFLEUR"]
+
+    if nom_key == "AYACHE ADEL":
+        if periode_is_on_or_after(periode, 2026, 7):
+            return ["YVETOT"]
+        if periode_is_on_or_after(periode, 2026, 6):
+            return ["MAROMME", "YVETOT"]
+        return ["MAROMME"]
+
+    if nom_key == "VUE JONATHAN":
+        return ["BOURG ACHARD"]
+
+    if user:
+        return get_user_agences(user)
+
+    return []
+
+
+def directeur_result_agences_for_period(nom, periode, user=None):
+    nom_key = strip_accents(normalize_key(nom))
+
+    if nom_key in ["EL GHAZOUANI NAHIM", "ELGHAZOUANI NAHIM"]:
+        return ["HARFLEUR", "MAROMME"] if periode_is_on_or_after(periode, 2026, 7) else ["HARFLEUR"]
+
+    if nom_key == "AYACHE ADEL":
+        return ["YVETOT"] if periode_is_on_or_after(periode, 2026, 7) else ["MAROMME"]
+
+    if nom_key == "VUE JONATHAN":
+        return ["BOURG ACHARD"]
+
+    if user:
+        return get_user_agences(user)
+
+    return directeur_agences_for_period(nom, periode, user)
+
+
+def agence_is_result_for_directeur(user, agence, periode):
+    result_agences = directeur_result_agences_for_period(user.get("nom", ""), periode, user)
+    return normalize_key(agence) in {normalize_key(a) for a in result_agences}
+
+
+def build_df_directeurs_for_period(df_agences, periode):
+    rules_directeurs = [
+        {"directeur": "VUE JONATHAN", "agences": directeur_result_agences_for_period("VUE JONATHAN", periode)},
+        {"directeur": "AYACHE ADEL", "agences": directeur_result_agences_for_period("AYACHE ADEL", periode)},
+        {"directeur": "EL GHAZOUANI NAHIM", "agences": directeur_result_agences_for_period("EL GHAZOUANI NAHIM", periode)},
+    ]
+
+    ca_by_agence = {
+        normalize_key(row["agence"]): to_float(row.get("ca_magasin_ok", 0.0))
+        for _, row in df_agences.iterrows()
+    } if isinstance(df_agences, pd.DataFrame) and not df_agences.empty and "agence" in df_agences.columns else {}
+
+    directeur_results = []
+    for rule in rules_directeurs:
+        rule_agences = rule.get("agences") or [rule.get("agence", "")]
+        for agence in rule_agences:
+            ca = ca_by_agence.get(normalize_key(agence), 0.0)
+            prime = prime_magasin(ca)
+            comm_magasin = round((ca * 0.01) + prime, 2) if ca > 0 else 0.0
+
+            directeur_results.append({
+                "directeur": rule["directeur"],
+                "agence": agence,
+                "ca_magasin_ok": round(ca, 2),
+                "un_pourcent_ca": round(ca * 0.01, 2),
+                "prime_palier": prime,
+                "commission_magasin_eur": comm_magasin
+            })
+
+    return pd.DataFrame(directeur_results)
 
 
 def sheet_name_evp_for_next_month(periode):
@@ -3572,7 +3910,8 @@ if role == "admin":
             key_cols,
             col_client,
             col_agence,
-            col_ca_magasin
+            col_ca_magasin,
+            periode
         )
 
         # ====================== AGENCES ======================
@@ -3670,35 +4009,7 @@ if role == "admin":
 
         # ====================== DIRECTEURS ======================
 
-        rules_directeurs = [
-            {"directeur": "VUE JONATHAN", "agence": "BOURG ACHARD"},
-            {"directeur": "AYACHE ADEL", "agence": "MAROMME"},
-            {"directeur": "EL GHAZOUANI NAHIM", "agence": "HARFLEUR"},
-        ]
-
-        directeur_results = []
-
-        ca_by_agence = {
-            normalize_key(row["agence"]): row["ca_magasin_ok"]
-            for _, row in df_agences.iterrows()
-        } if not df_agences.empty else {}
-
-        for rule in rules_directeurs:
-            ag_key = normalize_key(rule["agence"])
-            ca = ca_by_agence.get(ag_key, 0.0)
-            prime = prime_magasin(ca)
-            comm_magasin = round((ca * 0.01) + prime, 2) if ca > 0 else 0.0
-
-            directeur_results.append({
-                "directeur": rule["directeur"],
-                "agence": rule["agence"],
-                "ca_magasin_ok": round(ca, 2),
-                "un_pourcent_ca": round(ca * 0.01, 2),
-                "prime_palier": prime,
-                "commission_magasin_eur": comm_magasin
-            })
-
-        df_directeurs = pd.DataFrame(directeur_results)
+        df_directeurs = build_df_directeurs_for_period(df_agences, periode)
 
         if df_vendeurs.empty:
             st.error("❌ Aucun vendeur trouvé.")
@@ -3893,7 +4204,24 @@ def afficher_admin_users():
             lambda row: "Activée" if row.get("totp_enabled") and row.get("totp_confirmed") else ("À configurer" if row.get("totp_enabled") else "Non"),
             axis=1
         )
-        df_users = df_users.drop(columns=["password", "password_hash", "totp_secret"], errors="ignore")
+        periode_admin_users = st.session_state.get("periode", "")
+
+        def format_user_agences_display(row, result_only=False):
+            if row.get("role") != "directeur_agence":
+                return ""
+            row_user = row.to_dict()
+            agences = (
+                directeur_result_agences_for_period(row.get("nom", ""), periode_admin_users, row_user)
+                if result_only
+                else directeur_agences_for_period(row.get("nom", ""), periode_admin_users, row_user)
+            )
+            return " / ".join(agences)
+
+        df_users["agences"] = df_users.apply(
+            lambda row: format_user_agences_display(row, result_only=False),
+            axis=1
+        )
+        df_users = df_users.drop(columns=["password", "password_hash", "totp_secret", "agence"], errors="ignore")
         df_users.index.name = "Identifiant"
         st.dataframe(df_users, use_container_width=True)
     else:
@@ -3904,6 +4232,7 @@ def afficher_admin_users():
     st.write("### ➕ Ajouter un utilisateur")
 
     col1, col2 = st.columns(2)
+    agence_options_user = get_available_agence_options(settings, users)
 
     with col1:
         new_user = st.text_input("Nouvel identifiant", key="new_user").lower().strip()
@@ -3912,7 +4241,12 @@ def afficher_admin_users():
     with col2:
         new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence", "secretaire"], key="new_role")
         new_nom = st.text_input("Nom vendeur / utilisateur", key="new_nom").upper().strip()
-        new_agence = st.text_input("Agence si directeur", key="new_agence").upper().strip()
+        new_agences = st.multiselect(
+            "Agence(s) si directeur",
+            agence_options_user,
+            key="new_agences",
+            help="Choix utilisé pour l'espace directeur agence. Les règles datées Nahim / Adel restent prises en compte automatiquement."
+        )
         new_photo = st.text_input("Fichier photo", key="new_photo", placeholder="ex : prieur corentin.jpg").strip()
         new_totp_enabled = st.checkbox("Activer Authenticator (2FA)", key="new_totp_enabled")
 
@@ -3928,7 +4262,8 @@ def afficher_admin_users():
                 "password_hash": hash_password(new_password),
                 "role": new_role,
                 "nom": new_nom,
-                "agence": new_agence if new_role == "directeur_agence" else None,
+                "agence": new_agences[0] if new_role == "directeur_agence" and new_agences else None,
+                "agences": new_agences if new_role == "directeur_agence" else [],
                 "photo": clean_visible(new_photo),
                 "totp_enabled": bool(new_totp_enabled),
                 "totp_secret": generate_totp_secret() if new_totp_enabled else "",
@@ -3962,7 +4297,15 @@ def afficher_admin_users():
 
             edit_role = st.selectbox("Rôle", role_options, index=role_index, key="edit_role")
             edit_nom = st.text_input("Nom vendeur / utilisateur", value=u.get("nom", ""), key="edit_nom").upper().strip()
-            edit_agence = st.text_input("Agence", value=u.get("agence") or "", key="edit_agence").upper().strip()
+            edit_user_agences = get_user_agences(u)
+            edit_agence_options = sorted(set(agence_options_user + edit_user_agences), key=normalize_key)
+            edit_agences = st.multiselect(
+                "Agence(s)",
+                edit_agence_options,
+                default=[a for a in edit_user_agences if a in edit_agence_options],
+                key="edit_agences",
+                help="Choix utilisé pour l'espace directeur agence. Les règles datées Nahim / Adel restent prises en compte automatiquement."
+            )
             edit_photo = st.text_input("Fichier photo", value=u.get("photo") or "", key="edit_photo", placeholder="ex : prieur corentin.jpg").strip()
             edit_totp_enabled = st.checkbox(
                 "Activer Authenticator (2FA)",
@@ -3989,7 +4332,8 @@ def afficher_admin_users():
                 updated_user = {
                     "role": edit_role,
                     "nom": edit_nom,
-                    "agence": edit_agence if edit_role == "directeur_agence" else None,
+                    "agence": edit_agences[0] if edit_role == "directeur_agence" and edit_agences else None,
+                    "agences": edit_agences if edit_role == "directeur_agence" else [],
                     "photo": clean_visible(edit_photo),
                     "totp_enabled": bool(edit_totp_enabled),
                     "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
@@ -4146,15 +4490,17 @@ def afficher_admin_users():
         for a in st.session_state.df_agences.get("agence", pd.Series(dtype=str)).dropna().tolist():
             add_agence_option(a)
     for u in users.values():
-        add_agence_option(u.get("agence", ""))
+        for agence_user in get_user_agences(u):
+            add_agence_option(agence_user)
     for a in assignments.values():
         add_agence_option(a)
 
     assigned_commercial_keys = {normalize_key(commercial) for commercial in assignments.keys()}
+    commerciaux_all_options = sorted(commerciaux_by_key.values(), key=normalize_key)
     commerciaux_options = sorted(
         [
             commercial
-            for commercial in commerciaux_by_key.values()
+            for commercial in commerciaux_all_options
             if normalize_key(commercial) not in assigned_commercial_keys
         ],
         key=normalize_key
@@ -4220,6 +4566,108 @@ def afficher_admin_users():
                 st.rerun()
     else:
         st.caption("Charge une période ou crée des utilisateurs pour disposer des listes de commerciaux et d'agences.")
+
+    st.write("#### 📅 Changements d'agence programmés")
+    assignment_history = get_commercial_agence_assignment_history(settings)
+    history_rows = []
+    for commercial, changes in assignment_history.items():
+        if not isinstance(changes, list):
+            continue
+        for change in changes:
+            if isinstance(change, dict):
+                history_rows.append({
+                    "Commercial": commercial,
+                    "À partir de": clean_visible(change.get("from", "")),
+                    "Nouvelle agence": clean_visible(change.get("agence", "")) or "Aucune agence"
+                })
+
+    if history_rows:
+        st.dataframe(
+            pd.DataFrame(history_rows).sort_values(["À partir de", "Commercial"]),
+            use_container_width=True
+        )
+    else:
+        st.caption("Aucun changement programmé.")
+
+    if commerciaux_all_options and agences_options:
+        hist_col1, hist_col2, hist_col3 = st.columns([2, 1, 2])
+        with hist_col1:
+            hist_commercial = st.selectbox(
+                "Commercial concerné",
+                commerciaux_all_options,
+                key="assignment_history_commercial"
+            )
+        with hist_col2:
+            hist_from = st.text_input(
+                "À partir de",
+                value="2026-07",
+                help="Format attendu : AAAA-MM, exemple 2026-07",
+                key="assignment_history_from"
+            )
+        with hist_col3:
+            hist_agence_options = ["Aucune agence"] + agences_options
+            hist_agence = st.selectbox(
+                "Nouvelle agence",
+                hist_agence_options,
+                key="assignment_history_agence"
+            )
+
+        hist_from_clean = clean_visible(hist_from)
+        if st.button("Programmer le changement d'agence", key="save_assignment_history"):
+            if not re.match(r"^\d{4}-\d{2}$", hist_from_clean):
+                st.error("Format de date invalide. Utilise AAAA-MM, par exemple 2026-07.")
+            else:
+                changes = assignment_history.get(hist_commercial, [])
+                if not isinstance(changes, list):
+                    changes = []
+                changes = [
+                    change for change in changes
+                    if not (
+                        isinstance(change, dict)
+                        and clean_visible(change.get("from", "")) == hist_from_clean
+                    )
+                ]
+                changes.append({
+                    "from": hist_from_clean,
+                    "agence": "" if hist_agence == "Aucune agence" else hist_agence
+                })
+                assignment_history[hist_commercial] = sorted(
+                    changes,
+                    key=lambda change: clean_visible(change.get("from", "")) if isinstance(change, dict) else ""
+                )
+                settings["commercial_agence_assignment_history"] = assignment_history
+                save_settings(settings)
+                st.success("Changement programmé ✅")
+                st.rerun()
+
+        if history_rows:
+            delete_options = [
+                f"{row['Commercial']}|{row['À partir de']}"
+                for row in history_rows
+            ]
+            hist_delete = st.selectbox(
+                "Changement programmé à supprimer",
+                delete_options,
+                format_func=lambda value: value.replace("|", " → "),
+                key="delete_assignment_history"
+            )
+            if st.button("Supprimer ce changement programmé", key="delete_assignment_history_button"):
+                commercial_delete, from_delete = hist_delete.split("|", 1)
+                changes = assignment_history.get(commercial_delete, [])
+                if isinstance(changes, list):
+                    assignment_history[commercial_delete] = [
+                        change for change in changes
+                        if not (
+                            isinstance(change, dict)
+                            and clean_visible(change.get("from", "")) == from_delete
+                        )
+                    ]
+                    if not assignment_history[commercial_delete]:
+                        assignment_history.pop(commercial_delete, None)
+                    settings["commercial_agence_assignment_history"] = assignment_history
+                    save_settings(settings)
+                    st.success("Changement supprimé ✅")
+                    st.rerun()
 
     st.divider()
 
@@ -4310,9 +4758,7 @@ def afficher_annuel(tab):
             ].copy() if not df_v.empty else pd.DataFrame()
 
             if not df_a.empty:
-                df_a = df_a[
-                    df_a["agence"].apply(normalize_key) == normalize_key(user["agence"])
-                ].copy()
+                df_a = filter_df_by_directeur_agences_for_period(df_a, user, "agence")
 
         total_ok_annuel = df_v["ca_ok"].sum() if not df_v.empty and "ca_ok" in df_v.columns else 0
         total_commissions_annuel = df_v["commission_eur"].sum() if not df_v.empty and "commission_eur" in df_v.columns else 0
@@ -4500,15 +4946,13 @@ def afficher_dossiers_en_attente(tab):
         )
 
         if role == "directeur_agence":
-            directeur_agence = clean_visible(user.get("agence", ""))
-            if not directeur_agence:
+            directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+            if not directeur_agences:
                 st.warning("Aucune agence n'est affectée à ce compte directeur.")
                 return
-            attente = attente[
-                attente[col_agence].apply(normalize_key) == normalize_key(directeur_agence)
-            ]
+            attente = filter_df_by_directeur_agences_for_period(attente, user, col_agence, periode)
             if attente.empty:
-                st.success(f"Aucun dossier en attente pour l'agence {directeur_agence}.")
+                st.success(f"Aucun dossier en attente pour l'agence {user_agence_label(user)}.")
                 return
 
         if col_op and col_op in attente.columns:
@@ -4535,8 +4979,12 @@ def afficher_dossiers_en_attente(tab):
 
         vendeur_filtre = f1.selectbox("Commercial", ["Tous"] + vendeurs, key="attente_filtre_vendeur")
         if role == "directeur_agence":
-            agence_filtre = clean_visible(user.get("agence", ""))
-            f2.text_input("Agence", value=agence_filtre, disabled=True, key="attente_filtre_agence_directeur")
+            directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+            if len(directeur_agences) > 1:
+                agence_filtre = f2.selectbox("Agence", ["Toutes"] + directeur_agences, key="attente_filtre_agence_directeur_multi")
+            else:
+                agence_filtre = directeur_agences[0] if directeur_agences else ""
+                f2.text_input("Agence", value=agence_filtre, disabled=True, key="attente_filtre_agence_directeur")
         else:
             agence_filtre = f2.selectbox("Agence", ["Toutes"] + agences, key="attente_filtre_agence")
         opc_filtre = f3.selectbox("OPC", ["Tous", "Oui", "Non"], key="attente_filtre_opc")
@@ -4714,7 +5162,7 @@ def afficher_dossiers_en_attente(tab):
                         st.error("Le motif d'attente est obligatoire.")
                     elif (
                         role == "directeur_agence"
-                        and normalize_key(selected_row.get(col_agence, "")) != normalize_key(user.get("agence", ""))
+                        and not user_has_agence_for_period(user, selected_row.get(col_agence, ""), periode)
                     ):
                         st.error("Tu peux modifier uniquement les dossiers de ton agence.")
                     else:
@@ -4843,9 +5291,11 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
         periode_evp = st.session_state.get("periode", "Mois inconnu")
         settings = load_settings()
 
-        month_options = get_evp_month_options()
+        month_options = get_evp_month_options(settings, periode_evp)
         default_month = evp_period_key_from_periode(periode_evp)
         default_index = month_options.index(default_month) if default_month in month_options else 0
+        if clean_visible(st.session_state.get("evp_selected_month", "")) not in month_options:
+            st.session_state["evp_selected_month"] = month_options[default_index]
         selected_month = st.selectbox(
             "Mois EVP",
             month_options,
@@ -4863,7 +5313,11 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
         if selected_month == target_auto_month:
             st.info(f"Commissions automatiques depuis {periode_evp} → EVP {period_key}")
         else:
-            st.info(f"EVP {period_key} chargé depuis les données sauvegardées. Les commissions automatiques correspondent à {target_auto_month}.")
+            source_hint = previous_commission_period_from_evp_key(period_key)
+            st.info(
+                f"EVP {period_key} disponible en anticipation. "
+                f"Les commissions automatiques s'appliqueront quand la période source {source_hint or target_auto_month} sera chargée."
+            )
 
         if evp_df.empty:
             st.warning("Aucune ligne personnel disponible pour l'EVP.")
@@ -5107,7 +5561,8 @@ if st.session_state.get("df_vendeurs") is not None:
             st.session_state.key_cols,
             st.session_state.col_client,
             st.session_state.col_agence,
-            st.session_state.col_ca_magasin
+            st.session_state.col_ca_magasin,
+            periode
         )
         df_agences_all = st.session_state.get("df_agences", pd.DataFrame()).copy()
         df_agences_all = recompute_df_agences_attente(
@@ -5133,7 +5588,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "df_agences": df_agences_all.copy(),
         }
 
-    df_directeurs_all = st.session_state.get("df_directeurs", pd.DataFrame()).copy()
+    df_directeurs_all = build_df_directeurs_for_period(df_agences_all, periode)
 
     # ====================== FILTRAGE ROLE ======================
 
@@ -5146,8 +5601,8 @@ if st.session_state.get("df_vendeurs") is not None:
         df_directeurs = pd.DataFrame()
 
     elif role == "directeur_agence":
-        directeur_agence = user.get("agence")
-        assigned_vendor_keys = get_assigned_commercial_keys_for_agence(directeur_agence)
+        directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+        assigned_vendor_keys = get_assigned_commercial_keys_for_agences(directeur_agences, periode=periode)
         directeur_agence_vendeurs = set(assigned_vendor_keys)
         directeur_agence_vendeurs.add(normalize_key(user.get("nom", "")))
 
@@ -5158,9 +5613,7 @@ if st.session_state.get("df_vendeurs") is not None:
             df_vendeurs["Commercial"].apply(normalize_key).isin(assigned_vendor_keys)
         ].copy()
 
-        df_agences = df_agences_all[
-            df_agences_all["agence"].apply(normalize_key) == normalize_key(user["agence"])
-        ].copy() if not df_agences_all.empty else pd.DataFrame()
+        df_agences = filter_df_by_directeur_agences_for_period(df_agences_all, user, "agence", periode) if not df_agences_all.empty else pd.DataFrame()
 
         df_directeurs = df_directeurs_all[
             df_directeurs_all["directeur"].apply(normalize_key) == normalize_key(user["nom"])
@@ -5273,6 +5726,37 @@ if st.session_state.get("df_vendeurs") is not None:
                 st.info("Aucune donnée vendeur disponible pour ce compte.")
                 return
 
+            if agence_forced:
+                df_ok_scope = st.session_state.df_ok[agence_mask(
+                    st.session_state.df_ok,
+                    agence_forced,
+                    st.session_state.col_agence
+                )].copy()
+                df_c_scope = st.session_state.df_c[agence_mask(
+                    st.session_state.df_c,
+                    agence_forced,
+                    st.session_state.col_agence
+                )].copy()
+                source_vendeurs = recompute_df_vendeurs_indicators(
+                    source_vendeurs.copy(),
+                    df_ok_scope,
+                    df_c_scope,
+                    st.session_state.col_vente,
+                    st.session_state.col_catalogue,
+                    st.session_state.col_rem,
+                    st.session_state.col_op,
+                    [
+                        st.session_state.col_com1,
+                        st.session_state.col_com2,
+                        st.session_state.col_com3
+                    ],
+                    st.session_state.key_cols,
+                    st.session_state.col_client,
+                    st.session_state.col_agence,
+                    st.session_state.col_ca_magasin,
+                    periode
+                )
+
             if vendeur_forced:
                 vendeur = vendeur_forced
             else:
@@ -5302,16 +5786,26 @@ if st.session_state.get("df_vendeurs") is not None:
 
             if projection_total:
                 if is_responsable_agence(vendeur):
-                    base_affichee = 10
-                    points_affiches = 0
-                    commission_pct_affichee = 10
                     ca_projection_directeur = to_float(
                         data.get(
                             "ca_commissionnable_directeur_total",
                             data.get("ca_total", 0)
                         )
                     )
-                    commission_eur_affichee = round(ca_projection_directeur * 0.10, 2)
+                    if is_nahim(vendeur):
+                        remise_commission_affichee = to_float(
+                            data.get("remise_hors_opc_global_pct", data.get("remise_global_pct", 0))
+                        )
+                        base_affichee, points_affiches, commission_pct_affichee, commission_eur_affichee = calculate_fixed_base_commission(
+                            ca_projection_directeur,
+                            remise_commission_affichee,
+                            10
+                        )
+                    else:
+                        base_affichee = 10
+                        points_affiches = 0
+                        commission_pct_affichee = 10
+                        commission_eur_affichee = round(ca_projection_directeur * 0.10, 2)
                 else:
                     remise_commission_affichee = to_float(data.get("remise_hors_opc_global_pct", data.get("remise_global_pct", 0)))
                     base_affichee, points_affiches, commission_pct_affichee, commission_eur_affichee = calculate_commission(
@@ -5644,6 +6138,11 @@ if st.session_state.get("df_vendeurs") is not None:
                 return
 
             data = data.iloc[0]
+            if role == "directeur_agence" and not agence_is_result_for_directeur(user, agence, periode):
+                st.info(
+                    "Agence visible pour le suivi des dossiers en cours. "
+                    "Ces montants ne sont pas comptabilisés dans tes résultats / commissions agence sur cette période."
+                )
 
             c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -5973,9 +6472,45 @@ if st.session_state.get("df_vendeurs") is not None:
             if df_vendeurs_agence.empty:
                 st.info("Aucun vendeur n'est affecté à ton agence. Un administrateur doit renseigner les affectations dans ⚙️ Utilisateurs.")
             else:
-                afficher_vendeur(st.container(), vendeurs_source=df_vendeurs_agence)
+                directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+                agence_scope = None
+                df_vendeurs_agence_scope = df_vendeurs_agence
+                if len(directeur_agences) > 1:
+                    agence_scope = st.selectbox(
+                        "Filtrer les vendeurs par agence",
+                        directeur_agences,
+                        key="directeur_vendeurs_agence_scope"
+                    )
+                    assigned_scope_keys = get_assigned_commercial_keys_for_agence(agence_scope, periode=periode)
+                    df_vendeurs_agence_scope = df_vendeurs_agence[
+                        df_vendeurs_agence["Commercial"].apply(normalize_key).isin(assigned_scope_keys)
+                    ].copy()
+                    if df_vendeurs_agence_scope.empty:
+                        st.info(f"Aucun vendeur n'est affecté à l'agence {agence_scope}.")
+                elif len(directeur_agences) == 1:
+                    agence_scope = directeur_agences[0]
+
+                if not df_vendeurs_agence_scope.empty:
+                    afficher_vendeur(
+                        st.container(),
+                        agence_forced=agence_scope,
+                        vendeurs_source=df_vendeurs_agence_scope
+                    )
         if active_page == "🏢 Mon agence":
-            afficher_agence(st.container(), agence_forced=user["agence"])
+            directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
+            agence_scope = None
+            if len(directeur_agences) > 1:
+                agence_scope = st.selectbox(
+                    "Sélectionner une agence",
+                    directeur_agences,
+                    key="directeur_mon_agence_scope"
+                )
+            elif len(directeur_agences) == 1:
+                agence_scope = directeur_agences[0]
+            afficher_agence(
+                st.container(),
+                agence_forced=agence_scope
+            )
 
         if active_page == "👔 Commission agence":
             if df_directeurs.empty:
