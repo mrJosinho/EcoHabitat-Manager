@@ -1407,6 +1407,10 @@ def is_nahim(nom):
     return strip_accents(normalize_key(nom)) in ["EL GHAZOUANI NAHIM", "ELGHAZOUANI NAHIM"]
 
 
+def commercial_match_key(nom):
+    return resolve_nom_evp(nom)
+
+
 def row_remise_pct(row, col_rem, col_catalogue):
     if not col_rem or col_rem not in row.index or not col_catalogue or col_catalogue not in row.index:
         return 0.0
@@ -5594,7 +5598,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
     if role == "vendeur":
         df_vendeurs = df_vendeurs_all[
-            df_vendeurs_all["Commercial"].apply(normalize_key) == normalize_key(user["nom"])
+            df_vendeurs_all["Commercial"].apply(commercial_match_key) == commercial_match_key(user["nom"])
         ].copy()
 
         df_agences = pd.DataFrame()
@@ -5604,19 +5608,20 @@ if st.session_state.get("df_vendeurs") is not None:
         directeur_agences = directeur_agences_for_period(user.get("nom", ""), periode, user)
         assigned_vendor_keys = get_assigned_commercial_keys_for_agences(directeur_agences, periode=periode)
         directeur_agence_vendeurs = set(assigned_vendor_keys)
-        directeur_agence_vendeurs.add(normalize_key(user.get("nom", "")))
+        directeur_agence_vendeurs = {commercial_match_key(vendor_key) for vendor_key in directeur_agence_vendeurs}
+        directeur_agence_vendeurs.add(commercial_match_key(user.get("nom", "")))
 
         df_vendeurs = df_vendeurs_all[
-            df_vendeurs_all["Commercial"].apply(normalize_key).isin(directeur_agence_vendeurs)
+            df_vendeurs_all["Commercial"].apply(commercial_match_key).isin(directeur_agence_vendeurs)
         ].copy()
         df_vendeurs_agence = df_vendeurs[
-            df_vendeurs["Commercial"].apply(normalize_key).isin(assigned_vendor_keys)
+            df_vendeurs["Commercial"].apply(commercial_match_key).isin(directeur_agence_vendeurs - {commercial_match_key(user.get("nom", ""))})
         ].copy()
 
         df_agences = filter_df_by_directeur_agences_for_period(df_agences_all, user, "agence", periode) if not df_agences_all.empty else pd.DataFrame()
 
         df_directeurs = df_directeurs_all[
-            df_directeurs_all["directeur"].apply(normalize_key) == normalize_key(user["nom"])
+            df_directeurs_all["directeur"].apply(commercial_match_key) == commercial_match_key(user["nom"])
         ].copy() if not df_directeurs_all.empty else pd.DataFrame()
 
     else:
@@ -5770,7 +5775,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     key="vendeur_select"
                 )
 
-            data = source_vendeurs[source_vendeurs["Commercial"].apply(normalize_key) == normalize_key(vendeur)]
+            data = source_vendeurs[source_vendeurs["Commercial"].apply(commercial_match_key) == commercial_match_key(vendeur)]
 
             if data.empty:
                 st.info("Aucune donnée trouvée pour ce vendeur.")
@@ -6482,8 +6487,9 @@ if st.session_state.get("df_vendeurs") is not None:
                         key="directeur_vendeurs_agence_scope"
                     )
                     assigned_scope_keys = get_assigned_commercial_keys_for_agence(agence_scope, periode=periode)
+                    assigned_scope_keys = {commercial_match_key(key) for key in assigned_scope_keys}
                     df_vendeurs_agence_scope = df_vendeurs_agence[
-                        df_vendeurs_agence["Commercial"].apply(normalize_key).isin(assigned_scope_keys)
+                        df_vendeurs_agence["Commercial"].apply(commercial_match_key).isin(assigned_scope_keys)
                     ].copy()
                     if df_vendeurs_agence_scope.empty:
                         st.info(f"Aucun vendeur n'est affecté à l'agence {agence_scope}.")
