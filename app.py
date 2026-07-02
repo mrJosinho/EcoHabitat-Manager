@@ -4211,9 +4211,9 @@ def afficher_admin_users():
         periode_admin_users = st.session_state.get("periode", "")
 
         def format_user_agences_display(row, result_only=False):
-            if row.get("role") != "directeur_agence":
-                return ""
             row_user = row.to_dict()
+            if row.get("role") != "directeur_agence":
+                return " / ".join(get_user_agences(row_user))
             agences = (
                 directeur_result_agences_for_period(row.get("nom", ""), periode_admin_users, row_user)
                 if result_only
@@ -4246,10 +4246,10 @@ def afficher_admin_users():
         new_role = st.selectbox("Rôle", ["admin", "vendeur", "directeur_agence", "secretaire"], key="new_role")
         new_nom = st.text_input("Nom vendeur / utilisateur", key="new_nom").upper().strip()
         new_agences = st.multiselect(
-            "Agence(s) si directeur",
+            "Agence(s)",
             agence_options_user,
             key="new_agences",
-            help="Choix utilisé pour l'espace directeur agence. Les règles datées Nahim / Adel restent prises en compte automatiquement."
+            help="Pour un vendeur, ce choix sert à l'affectation commercial/agence. Pour un directeur, il sert à son espace agence."
         )
         new_photo = st.text_input("Fichier photo", key="new_photo", placeholder="ex : prieur corentin.jpg").strip()
         new_totp_enabled = st.checkbox("Activer Authenticator (2FA)", key="new_totp_enabled")
@@ -4266,13 +4266,21 @@ def afficher_admin_users():
                 "password_hash": hash_password(new_password),
                 "role": new_role,
                 "nom": new_nom,
-                "agence": new_agences[0] if new_role == "directeur_agence" and new_agences else None,
-                "agences": new_agences if new_role == "directeur_agence" else [],
+                "agence": new_agences[0] if new_agences else None,
+                "agences": new_agences if new_role in ["vendeur", "directeur_agence"] else [],
                 "photo": clean_visible(new_photo),
                 "totp_enabled": bool(new_totp_enabled),
                 "totp_secret": generate_totp_secret() if new_totp_enabled else "",
                 "totp_confirmed": False
             }
+            if new_role == "vendeur":
+                assignments = get_commercial_agence_assignments(settings)
+                if new_agences:
+                    assignments[new_nom] = new_agences[0]
+                else:
+                    assignments.pop(new_nom, None)
+                settings["commercial_agence_assignments"] = assignments
+                save_settings(settings)
             save_users(users)
             st.success("Utilisateur créé ✅")
             st.rerun()
@@ -4308,7 +4316,7 @@ def afficher_admin_users():
                 edit_agence_options,
                 default=[a for a in edit_user_agences if a in edit_agence_options],
                 key="edit_agences",
-                help="Choix utilisé pour l'espace directeur agence. Les règles datées Nahim / Adel restent prises en compte automatiquement."
+                help="Pour un vendeur, ce choix sert à l'affectation commercial/agence. Pour un directeur, il sert à son espace agence."
             )
             edit_photo = st.text_input("Fichier photo", value=u.get("photo") or "", key="edit_photo", placeholder="ex : prieur corentin.jpg").strip()
             edit_totp_enabled = st.checkbox(
@@ -4336,8 +4344,8 @@ def afficher_admin_users():
                 updated_user = {
                     "role": edit_role,
                     "nom": edit_nom,
-                    "agence": edit_agences[0] if edit_role == "directeur_agence" and edit_agences else None,
-                    "agences": edit_agences if edit_role == "directeur_agence" else [],
+                    "agence": edit_agences[0] if edit_agences else None,
+                    "agences": edit_agences if edit_role in ["vendeur", "directeur_agence"] else [],
                     "photo": clean_visible(edit_photo),
                     "totp_enabled": bool(edit_totp_enabled),
                     "totp_secret": (u.get("totp_secret") or generate_totp_secret()) if edit_totp_enabled else "",
@@ -4358,6 +4366,21 @@ def afficher_admin_users():
                         updated_user["password_hash"] = hash_password(u.get("password"))
 
                 users[user_edit] = updated_user
+                if edit_role == "vendeur":
+                    old_nom = clean_visible(u.get("nom", ""))
+                    assignments = get_commercial_agence_assignments(settings)
+                    if old_nom and normalize_key(old_nom) != normalize_key(edit_nom):
+                        for assignment_key in list(assignments.keys()):
+                            if normalize_key(assignment_key) == normalize_key(old_nom):
+                                assignments.pop(assignment_key, None)
+                    if edit_agences:
+                        assignments[edit_nom] = edit_agences[0]
+                    else:
+                        for assignment_key in list(assignments.keys()):
+                            if normalize_key(assignment_key) == normalize_key(edit_nom):
+                                assignments.pop(assignment_key, None)
+                    settings["commercial_agence_assignments"] = assignments
+                    save_settings(settings)
                 save_users(users)
 
                 if user_edit == st.session_state.get("username"):
