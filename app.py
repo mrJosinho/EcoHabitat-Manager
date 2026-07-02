@@ -2639,6 +2639,34 @@ def get_evp_excluded_keys(settings, period_key):
     return set()
 
 
+def evp_period_is_on_or_after(period_key, reference_key):
+    if not clean_visible(period_key) or not clean_visible(reference_key):
+        return False
+    return evp_period_sort_key(period_key) >= evp_period_sort_key(reference_key)
+
+
+def get_evp_departure_periods(settings):
+    departures = settings.get("evp_personnel_departure_period_by_key", {})
+    return departures if isinstance(departures, dict) else {}
+
+
+def set_evp_departure_period(settings, personnel_key, period_key):
+    departures = get_evp_departure_periods(settings).copy()
+    departures[personnel_key] = period_key
+    settings["evp_personnel_departure_period_by_key"] = departures
+
+
+def clear_evp_departure_period(settings, personnel_key):
+    departures = get_evp_departure_periods(settings).copy()
+    departures.pop(personnel_key, None)
+    settings["evp_personnel_departure_period_by_key"] = departures
+
+
+def evp_personnel_is_departed(settings, personnel_key, period_key):
+    departure_period = get_evp_departure_periods(settings).get(personnel_key, "")
+    return bool(departure_period) and evp_period_is_on_or_after(period_key, departure_period)
+
+
 def set_evp_excluded_keys(settings, period_key, keys):
     by_period = settings.get("evp_personnel_excluded_keys_by_period", {})
     if not isinstance(by_period, dict):
@@ -2677,6 +2705,79 @@ def get_evp_affectation_options(settings=None):
         pass
     values = {v for v in values if v}
     return sorted(values, key=normalize_key) or ["BOURG ACHARD", "HARFLEUR", "MAROMME", "YVETOT"]
+
+
+def get_evp_manual_personnel(settings):
+    manual = settings.get("evp_personnel_manual", {})
+    return manual if isinstance(manual, dict) else {}
+
+
+def set_evp_manual_person(settings, period_key, row):
+    nom = format_evp_person_name(row.get("NOM_PRENOM", ""))
+    key = resolve_nom_evp(nom)
+    if not key:
+        return
+    manual = get_evp_manual_personnel(settings).copy()
+    current = manual.get(key, {}) if isinstance(manual.get(key, {}), dict) else {}
+    start_period = clean_visible(current.get("start_period", "")) or period_key
+    if evp_period_sort_key(period_key) < evp_period_sort_key(start_period):
+        start_period = period_key
+    manual[key] = {
+        "start_period": start_period,
+        "Affectation": format_evp_affectation(row.get("Affectation", "")),
+        "NOM_PRENOM": nom,
+        "Contrat": clean_visible(row.get("Contrat", "")),
+        "Salaire Fixe": row.get("Salaire Fixe", "")
+    }
+    settings["evp_personnel_manual"] = manual
+    clear_evp_departure_period(settings, key)
+
+
+def remove_evp_manual_person(settings, personnel_key):
+    manual = get_evp_manual_personnel(settings).copy()
+    manual.pop(personnel_key, None)
+    settings["evp_personnel_manual"] = manual
+
+
+def get_evp_manual_rows_for_period(settings, period_key, base_keys):
+    rows_by_key = {}
+    for key, row in get_evp_manual_personnel(settings).items():
+        if not isinstance(row, dict):
+            continue
+        start_period = clean_visible(row.get("start_period", ""))
+        if start_period and evp_period_sort_key(start_period) > evp_period_sort_key(period_key):
+            continue
+        if evp_personnel_is_departed(settings, key, period_key):
+            continue
+        rows_by_key[key] = {
+            "Affectation": format_evp_affectation(row.get("Affectation", "")),
+            "NOM_PRENOM": format_evp_person_name(row.get("NOM_PRENOM", key)),
+            "Contrat": clean_visible(row.get("Contrat", "")),
+            "Salaire Fixe": row.get("Salaire Fixe", "")
+        }
+
+    saved_by_period = settings.get("evp_paie_data", {})
+    if isinstance(saved_by_period, dict):
+        sorted_periods = sorted(
+            [p for p in saved_by_period.keys() if evp_period_sort_key(p) <= evp_period_sort_key(period_key)],
+            key=evp_period_sort_key
+        )
+        for saved_period in sorted_periods:
+            period_data = saved_by_period.get(saved_period, {})
+            if not isinstance(period_data, dict):
+                continue
+            for key, saved in period_data.items():
+                if key in base_keys or not isinstance(saved, dict):
+                    continue
+                if evp_personnel_is_departed(settings, key, period_key):
+                    continue
+                rows_by_key[key] = {
+                    "Affectation": format_evp_affectation(saved.get("Affectation", "")),
+                    "NOM_PRENOM": format_evp_person_name(saved.get("NOM_PRENOM", key)),
+                    "Contrat": clean_visible(saved.get("Contrat", "")),
+                    "Salaire Fixe": saved.get("Salaire Fixe", "")
+                }
+    return rows_by_key
 
 
 def build_evp_auto_maps(df_vendeurs, df_directeurs):
@@ -2721,6 +2822,12 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
     apply_auto_commissions = period_key == evp_period_key_from_periode(periode)
 
     known_keys = {resolve_nom_evp(row.get("NOM_PRENOM", "")) for row in personnel}
+    manual_rows = get_evp_manual_rows_for_period(settings, period_key, known_keys)
+    for key, manual_row in manual_rows.items():
+        if key not in known_keys and key not in excluded_keys:
+            personnel.append(manual_row)
+            known_keys.add(key)
+
     if apply_auto_commissions:
         for key, auto_values in vendeurs_map.items():
             if key not in known_keys and key not in excluded_keys:
@@ -2750,6 +2857,8 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
             continue
         key = resolve_nom_evp(nom)
         if key in excluded_keys:
+            continue
+        if evp_personnel_is_departed(settings, key, period_key):
             continue
         manual = saved_rows.get(key, {}) if isinstance(saved_rows, dict) else {}
         auto = vendeurs_map.get(key, {}) if apply_auto_commissions else {}
@@ -3297,6 +3406,41 @@ def load_all_historique_cached(signature):
 
 def load_all_historique():
     return load_all_historique_cached(historique_signature())
+
+
+def filter_historique_period(df, periode):
+    if not isinstance(df, pd.DataFrame) or df.empty or "periode" not in df.columns:
+        return pd.DataFrame()
+    periode_key = normalize_key(periode)
+    return df[df["periode"].apply(normalize_key) == periode_key].copy()
+
+
+def resolve_evp_auto_source_data(selected_evp_month, current_periode, df_vendeurs_source, df_directeurs_source):
+    target_auto_month = evp_period_key_from_periode(current_periode)
+    selected_evp_month = clean_visible(selected_evp_month) or target_auto_month
+
+    if selected_evp_month == target_auto_month:
+        return current_periode, df_vendeurs_source, df_directeurs_source, True
+
+    source_periode = previous_commission_period_from_evp_key(selected_evp_month)
+    if not source_periode:
+        return current_periode, pd.DataFrame(), pd.DataFrame(), False
+
+    try:
+        df_all_vendeurs, df_all_agences, df_all_directeurs = load_all_historique()
+    except Exception:
+        return source_periode, pd.DataFrame(), pd.DataFrame(), False
+
+    df_vendeurs_auto = filter_historique_period(df_all_vendeurs, source_periode)
+    df_directeurs_auto = filter_historique_period(df_all_directeurs, source_periode)
+
+    if df_directeurs_auto.empty:
+        df_agences_auto = filter_historique_period(df_all_agences, source_periode)
+        if not df_agences_auto.empty:
+            df_directeurs_auto = build_df_directeurs_for_period(df_agences_auto, source_periode)
+
+    source_loaded = not df_vendeurs_auto.empty or not df_directeurs_auto.empty
+    return source_periode, df_vendeurs_auto, df_directeurs_auto, source_loaded
 
 
 # ====================== FORMAT TABLEAUX ======================
@@ -5329,16 +5473,22 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
             index=default_index,
             key="evp_selected_month"
         )
-        evp_df, period_key = build_evp_manager_dataframe(
-            settings,
+        evp_source_periode, evp_auto_vendeurs, evp_auto_directeurs, evp_source_loaded = resolve_evp_auto_source_data(
+            selected_month,
             periode_evp,
             df_vendeurs_source,
             df_directeurs_source
         )
+        evp_df, period_key = build_evp_manager_dataframe(
+            settings,
+            evp_source_periode,
+            evp_auto_vendeurs,
+            evp_auto_directeurs
+        )
 
         target_auto_month = evp_period_key_from_periode(periode_evp)
-        if selected_month == target_auto_month:
-            st.info(f"Commissions automatiques depuis {periode_evp} → EVP {period_key}")
+        if evp_source_loaded:
+            st.info(f"Commissions automatiques depuis {evp_source_periode} → EVP {period_key}")
         else:
             source_hint = previous_commission_period_from_evp_key(period_key)
             st.info(
@@ -5385,11 +5535,13 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                             "Contrat": clean_visible(new_contrat),
                             "Salaire Fixe": new_salaire if new_salaire else ""
                         }
+                        set_evp_manual_person(settings_add, period_key, period_data[key])
                         evp_data[period_key] = period_data
                         settings_add["evp_paie_data"] = evp_data
                         excluded = get_evp_excluded_keys(settings_add, period_key)
                         excluded.discard(key)
                         set_evp_excluded_keys(settings_add, period_key, excluded)
+                        clear_evp_departure_period(settings_add, key)
                         save_settings(settings_add)
                         st.success("Personnel ajouté ✅")
                         st.rerun()
@@ -5421,6 +5573,9 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                     excluded = get_evp_excluded_keys(settings_del, period_key)
                     excluded.update(keys_to_delete)
                     set_evp_excluded_keys(settings_del, period_key, excluded)
+                    for key in keys_to_delete:
+                        remove_evp_manual_person(settings_del, key)
+                        set_evp_departure_period(settings_del, key, period_key)
                     settings_del["evp_paie_data"] = evp_data
                     save_settings(settings_del)
                     st.success("Personnel supprimé ✅")
@@ -5486,7 +5641,12 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                     st.success("EVP sauvegardé dans Manager ✅")
                     st.rerun()
 
-        refreshed_df, _ = build_evp_manager_dataframe(settings, periode_evp, df_vendeurs_source, df_directeurs_source)
+        refreshed_df, _ = build_evp_manager_dataframe(
+            settings,
+            evp_source_periode,
+            evp_auto_vendeurs,
+            evp_auto_directeurs
+        )
         xlsx_bytes = create_evp_manager_workbook(refreshed_df, period_key)
         filename = f"EVP_elements_paie_{safe_filename(period_key)}.xlsx"
 
