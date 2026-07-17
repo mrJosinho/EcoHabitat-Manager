@@ -849,7 +849,7 @@ EVP_HEADERS = [
     "Solde acompte après reprise"
 ]
 
-EVP_AUTO_COLUMNS = ["Total vente HT", "taux", "Montant", "décommission", "Comm. Magasin", "Solde acompte après reprise"]
+EVP_AUTO_COLUMNS = ["Total vente HT", "taux", "Montant", "décommission", "Comm. Magasin"]
 EVP_PERCENT_COLUMNS = ["taux", "décommission"]
 EVP_NUMERIC_COLUMNS = [
     "Acompte versé",
@@ -2624,6 +2624,14 @@ def previous_commission_period_from_evp_key(period_key):
     return evp_period_key_from_month_year(previous_month, previous_year).title()
 
 
+def previous_evp_period_key(period_key):
+    month, year = periode_to_month_year(period_key)
+    if not month or not year:
+        return ""
+    previous_month, previous_year = add_months_to_month_year(month, year, -1)
+    return evp_period_key_from_month_year(previous_month, previous_year)
+
+
 def get_evp_seed_rows(period_key):
     seed = get_evp_seed_data()
     rows = seed.get(period_key, [])
@@ -2808,6 +2816,41 @@ def build_evp_auto_maps(df_vendeurs, df_directeurs):
     return vendeurs_map, directeurs_map
 
 
+def get_evp_acompte_reports_from_previous_month(settings, period_key):
+    previous_period_key = previous_evp_period_key(period_key)
+    if not previous_period_key:
+        return {}
+
+    saved_by_period = settings.get("evp_paie_data", {})
+    previous_rows = saved_by_period.get(previous_period_key, {}) if isinstance(saved_by_period, dict) else {}
+    if not isinstance(previous_rows, dict) or not previous_rows:
+        return {}
+
+    overrides_by_period = settings.get("evp_paie_overrides", {})
+    previous_overrides = overrides_by_period.get(previous_period_key, {}) if isinstance(overrides_by_period, dict) else {}
+    if not isinstance(previous_overrides, dict):
+        previous_overrides = {}
+
+    reports = {}
+    for key, row in previous_rows.items():
+        if not isinstance(row, dict):
+            continue
+
+        override_row = previous_overrides.get(key, {})
+        solde_override = override_row.get("Solde acompte après reprise", "") if isinstance(override_row, dict) else ""
+        if clean_visible(solde_override) and clean_visible(solde_override).lower() not in {"none", "nan"}:
+            solde = to_float(solde_override)
+        else:
+            acompte = to_float(row.get("Acompte versé", 0))
+            reprise = to_float(row.get("Acompte a reprendre", 0))
+            solde = round(acompte - reprise, 2) if acompte or reprise else 0
+
+        if solde:
+            reports[key] = solde
+
+    return reports
+
+
 def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
     period_key = evp_period_key_from_periode(periode)
     selected_period_key = clean_visible(st.session_state.get("evp_selected_month", "")) or period_key
@@ -2819,6 +2862,7 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
     personnel = get_evp_seed_rows(period_key)
     excluded_keys = get_evp_excluded_keys(settings, period_key)
     vendeurs_map, directeurs_map = build_evp_auto_maps(df_vendeurs, df_directeurs)
+    acompte_reports = get_evp_acompte_reports_from_previous_month(settings, period_key)
     apply_auto_commissions = period_key == evp_period_key_from_periode(periode)
 
     known_keys = {resolve_nom_evp(row.get("NOM_PRENOM", "")) for row in personnel}
@@ -2875,6 +2919,9 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
             elif col in base:
                 row[col] = base.get(col, "")
 
+        if not clean_visible(row.get("Acompte versé", "")) and key in acompte_reports:
+            row["Acompte versé"] = acompte_reports[key]
+
         for col in ["Total vente HT", "taux", "Montant", "décommission"]:
             row[col] = auto.get(col, base.get(col, ""))
 
@@ -2896,6 +2943,7 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
         df["_sort_agence"] = df["Affectation"].apply(normalize_key)
         df["_sort_nom"] = df["NOM_PRENOM"].apply(normalize_key)
         df = df.sort_values(["_sort_agence", "_sort_nom"]).drop(columns=["_sort_agence", "_sort_nom"])
+        df = apply_evp_solde_acompte_rule(df)
     return df.reset_index(drop=True), period_key
 
 
@@ -2950,7 +2998,31 @@ def normalize_evp_editor_dataframe(edited_df):
         if col in EVP_PERCENT_COLUMNS:
             values = values.apply(lambda value: value / 100 if value != "" else "")
         storage_df[col] = values
+    storage_df = apply_evp_solde_acompte_rule(storage_df)
     return storage_df
+
+
+def apply_evp_solde_acompte_rule(df):
+    if df is None or df.empty:
+        return df
+    if "Acompte versé" not in df.columns or "Acompte a reprendre" not in df.columns:
+        return df
+
+    out = df.copy()
+    if "Solde acompte après reprise" not in out.columns:
+        out["Solde acompte après reprise"] = ""
+
+    for idx, row in out.iterrows():
+        has_acompte = clean_visible(row.get("Acompte versé", "")).lower() not in {"", "none", "nan"}
+        has_reprise = clean_visible(row.get("Acompte a reprendre", "")).lower() not in {"", "none", "nan"}
+        if has_acompte or has_reprise:
+            out.at[idx, "Solde acompte après reprise"] = round(
+                to_float(row.get("Acompte versé", 0)) - to_float(row.get("Acompte a reprendre", 0)),
+                2
+            )
+        else:
+            out.at[idx, "Solde acompte après reprise"] = ""
+    return out
 
 
 def evp_values_different(left, right):
@@ -5612,6 +5684,7 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
             height=650,
             num_rows="fixed",
             hide_index=True,
+            disabled=["Solde acompte après reprise"],
             column_config=column_config
         )
         edited_storage_df = normalize_evp_editor_dataframe(edited_df)
