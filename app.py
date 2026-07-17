@@ -3011,6 +3011,8 @@ def apply_evp_solde_acompte_rule(df):
     out = df.copy()
     if "Solde acompte après reprise" not in out.columns:
         out["Solde acompte après reprise"] = ""
+    else:
+        out["Solde acompte après reprise"] = out["Solde acompte après reprise"].astype(object)
 
     for idx, row in out.iterrows():
         has_acompte = clean_visible(row.get("Acompte versé", "")).lower() not in {"", "none", "nan"}
