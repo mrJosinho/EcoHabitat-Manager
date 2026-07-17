@@ -2823,7 +2823,17 @@ def get_evp_acompte_reports_from_previous_month(settings, period_key):
 
     saved_by_period = settings.get("evp_paie_data", {})
     previous_rows = saved_by_period.get(previous_period_key, {}) if isinstance(saved_by_period, dict) else {}
-    if not isinstance(previous_rows, dict) or not previous_rows:
+    if not isinstance(previous_rows, dict):
+        previous_rows = {}
+
+    base_rows = {
+        resolve_nom_evp(row.get("NOM_PRENOM", "")): row
+        for row in get_evp_seed_rows(previous_period_key)
+        if clean_visible(row.get("NOM_PRENOM", ""))
+    }
+    merged_rows = dict(base_rows)
+    merged_rows.update(previous_rows)
+    if not merged_rows:
         return {}
 
     overrides_by_period = settings.get("evp_paie_overrides", {})
@@ -2832,14 +2842,17 @@ def get_evp_acompte_reports_from_previous_month(settings, period_key):
         previous_overrides = {}
 
     reports = {}
-    for key, row in previous_rows.items():
+    for key, row in merged_rows.items():
         if not isinstance(row, dict):
             continue
 
         override_row = previous_overrides.get(key, {})
-        solde_override = override_row.get("Solde acompte après reprise", "") if isinstance(override_row, dict) else ""
-        if clean_visible(solde_override) and clean_visible(solde_override).lower() not in {"none", "nan"}:
-            solde = to_float(solde_override)
+        solde_value = override_row.get("Solde acompte après reprise", "") if isinstance(override_row, dict) else ""
+        if not clean_visible(solde_value) or clean_visible(solde_value).lower() in {"none", "nan"}:
+            solde_value = row.get("Solde acompte après reprise", "")
+
+        if clean_visible(solde_value) and clean_visible(solde_value).lower() not in {"none", "nan"}:
+            solde = to_float(solde_value)
         else:
             acompte = to_float(row.get("Acompte versé", 0))
             reprise = to_float(row.get("Acompte a reprendre", 0))
@@ -2919,7 +2932,11 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
             elif col in base:
                 row[col] = base.get(col, "")
 
-        if not clean_visible(row.get("Acompte versé", "")) and key in acompte_reports:
+        current_acompte = row.get("Acompte versé", "")
+        if key in acompte_reports and (
+            not clean_visible(current_acompte)
+            or to_float(current_acompte) == 0
+        ):
             row["Acompte versé"] = acompte_reports[key]
 
         for col in ["Total vente HT", "taux", "Montant", "décommission"]:
