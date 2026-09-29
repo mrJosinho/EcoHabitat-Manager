@@ -1345,6 +1345,53 @@ def resolve_nom_evp(nom):
     return aliases.get(k, k)
 
 
+def apply_bourg_achard_direction_transition():
+    settings = load_settings()
+    migration_key = "bourg_achard_direction_gaetan_2026_07_v1"
+    if settings.get(migration_key):
+        return
+
+    users = load_users()
+    users_changed = False
+    display_names = {
+        "VUE JONATHAN": "VUE JONATHAN",
+        "GELLY GAETAN": "GELLY GAETAN",
+    }
+
+    for user_data in users.values():
+        if not isinstance(user_data, dict):
+            continue
+        personnel_key = resolve_nom_evp(user_data.get("nom", ""))
+        if personnel_key == "VUE JONATHAN":
+            user_data["role"] = "vendeur"
+            user_data["agence"] = "BOURG ACHARD"
+            user_data["agences"] = ["BOURG ACHARD"]
+            users_changed = True
+        elif personnel_key == "GELLY GAETAN":
+            user_data["role"] = "directeur_agence"
+            user_data["agence"] = "BOURG ACHARD"
+            user_data["agences"] = ["BOURG ACHARD"]
+            users_changed = True
+
+    if users_changed:
+        save_users(users)
+
+    assignments = get_commercial_agence_assignments(settings).copy()
+    for personnel_key, display_name in display_names.items():
+        matching_keys = [
+            existing_name for existing_name in assignments
+            if resolve_nom_evp(existing_name) == personnel_key
+        ]
+        assignment_name = matching_keys[0] if matching_keys else display_name
+        for duplicate_name in matching_keys[1:]:
+            assignments.pop(duplicate_name, None)
+        assignments[assignment_name] = "BOURG ACHARD"
+
+    settings["commercial_agence_assignments"] = assignments
+    settings[migration_key] = True
+    save_settings(settings)
+
+
 def prime_magasin(ca_ht):
     if ca_ht >= 300000:
         return 1000
@@ -3359,7 +3406,7 @@ def directeur_agences_for_period(nom, periode, user=None):
             return ["MAROMME", "YVETOT"]
         return ["MAROMME"]
 
-    if nom_key == "VUE JONATHAN":
+    if nom_key == "GELLY GAETAN":
         return ["BOURG ACHARD"]
 
     if user:
@@ -3377,7 +3424,7 @@ def directeur_result_agences_for_period(nom, periode, user=None):
     if nom_key == "AYACHE ADEL":
         return ["YVETOT"] if periode_is_on_or_after(periode, 2026, 7) else ["MAROMME"]
 
-    if nom_key == "VUE JONATHAN":
+    if nom_key == "GELLY GAETAN":
         return ["BOURG ACHARD"]
 
     if user:
@@ -3626,6 +3673,8 @@ def format_df_directeurs(df):
 
 
 # ====================== LOGIN ======================
+
+apply_bourg_achard_direction_transition()
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
