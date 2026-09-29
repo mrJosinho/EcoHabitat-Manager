@@ -880,16 +880,16 @@ EVP_BASE_COLUMNS = ["Affectation", "NOM_PRENOM", "Contrat"]
 
 DEFAULT_EVP_PERSONNEL = [
     {"Affectation": "Bourg Achard", "NOM_PRENOM": "BALDACCHINO Antoine", "Contrat": "CDI", "Salaire Fixe": 750},
-    {"Affectation": "Bourg Achard", "NOM_PRENOM": "GELLY Gaëtan", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "GELLY Gaëtan", "Contrat": "CDI", "Salaire Fixe": 1400},
     {"Affectation": "Bourg Achard", "NOM_PRENOM": "JARRY Jérôme", "Contrat": "CDI", "Salaire Fixe": ""},
     {"Affectation": "Bourg Achard", "NOM_PRENOM": "OUZAID DRISS", "Contrat": "CDI", "Salaire Fixe": 950},
     {"Affectation": "Bourg Achard", "NOM_PRENOM": "TRUONG Laugan", "Contrat": "CDI", "Salaire Fixe": 750},
-    {"Affectation": "Bourg Achard", "NOM_PRENOM": "VUE JONATHAN", "Contrat": "CDI", "Salaire Fixe": 2000},
+    {"Affectation": "Bourg Achard", "NOM_PRENOM": "VUE JONATHAN", "Contrat": "CDI", "Salaire Fixe": 1400},
     {"Affectation": "Harfleur", "NOM_PRENOM": "DUSSART Robin", "Contrat": "APP", "Salaire Fixe": ""},
-    {"Affectation": "Harfleur", "NOM_PRENOM": "EL GHAZOUANI NAHIM", "Contrat": "CDI", "Salaire Fixe": 1800},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "EL GHAZOUANI NAHIM", "Contrat": "CDI", "Salaire Fixe": 2400},
     {"Affectation": "Harfleur", "NOM_PRENOM": "JOUVE Amon", "Contrat": "CDI", "Salaire Fixe": 750},
     {"Affectation": "Harfleur", "NOM_PRENOM": "LEMONNIER Florian", "Contrat": "CDI", "Salaire Fixe": 750},
-    {"Affectation": "Harfleur", "NOM_PRENOM": "LEVASSEUR Nicolas", "Contrat": "CDI", "Salaire Fixe": 1200},
+    {"Affectation": "Harfleur", "NOM_PRENOM": "LEVASSEUR Nicolas", "Contrat": "CDI", "Salaire Fixe": 1400},
     {"Affectation": "Harfleur", "NOM_PRENOM": "MONNIER Clément", "Contrat": "CDI", "Salaire Fixe": 750},
     {"Affectation": "Harfleur", "NOM_PRENOM": "PRIEUR Corentin", "Contrat": "CDI", "Salaire Fixe": 950},
     {"Affectation": "Harfleur", "NOM_PRENOM": "ROSANI Lorenzo", "Contrat": "CDI", "Salaire Fixe": 750},
@@ -1323,7 +1323,6 @@ def is_responsable_agence(nom):
     return strip_accents(normalize_key(nom)) in [
         "AYACHE ADEL",
         "EL GHAZOUANI NAHIM",
-        "VUE JONATHAN",
     ]
 
 
@@ -2788,6 +2787,31 @@ def get_evp_manual_rows_for_period(settings, period_key, base_keys):
     return rows_by_key
 
 
+EVP_FIXED_SALARY_RULES = {
+    "EL GHAZOUANI NAHIM": {"start_period": "JUILLET 2026", "amount": 2400, "legacy_amounts": {1800}},
+    "LEVASSEUR NICOLAS": {"start_period": "JUILLET 2026", "amount": 1400, "legacy_amounts": {1200}},
+    "VUE JONATHAN": {"start_period": "JUILLET 2026", "amount": 1400, "legacy_amounts": {2000}},
+    "GELLY GAETAN": {"start_period": "JUILLET 2026", "amount": 1400, "legacy_amounts": {1200}},
+}
+
+
+def apply_evp_fixed_salary_rule(row, personnel_key, period_key):
+    rule = EVP_FIXED_SALARY_RULES.get(personnel_key)
+    if not rule or evp_period_sort_key(period_key) < evp_period_sort_key(rule["start_period"]):
+        return
+
+    current_value = row.get("Salaire Fixe", "")
+    current_amount = to_float(current_value) if clean_visible(current_value) else None
+    if current_amount is None or current_amount in rule["legacy_amounts"]:
+        row["Salaire Fixe"] = rule["amount"]
+
+
+def has_evp_store_commission(personnel_key, period_key):
+    if evp_period_sort_key(period_key) >= evp_period_sort_key("JUILLET 2026"):
+        return personnel_key not in {"VUE JONATHAN", "GELLY GAETAN"}
+    return True
+
+
 def build_evp_auto_maps(df_vendeurs, df_directeurs):
     vendeurs_map = {}
     if df_vendeurs is not None and not df_vendeurs.empty:
@@ -2932,6 +2956,8 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
             elif col in base:
                 row[col] = base.get(col, "")
 
+        apply_evp_fixed_salary_rule(row, key, period_key)
+
         current_acompte = row.get("Acompte versé", "")
         if key in acompte_reports and (
             not clean_visible(current_acompte)
@@ -2943,7 +2969,10 @@ def build_evp_manager_dataframe(settings, periode, df_vendeurs, df_directeurs):
             row[col] = auto.get(col, base.get(col, ""))
 
         comm_magasin = directeurs_map.get(key, 0) if apply_auto_commissions else 0
-        row["Comm. Magasin"] = comm_magasin if comm_magasin else base.get("Comm. Magasin", "")
+        if has_evp_store_commission(key, period_key):
+            row["Comm. Magasin"] = comm_magasin if comm_magasin else base.get("Comm. Magasin", "")
+        else:
+            row["Comm. Magasin"] = ""
 
         acompte = to_float(row.get("Acompte versé", 0))
         reprise = to_float(row.get("Acompte a reprendre", 0))
@@ -3364,7 +3393,6 @@ def agence_is_result_for_directeur(user, agence, periode):
 
 def build_df_directeurs_for_period(df_agences, periode):
     rules_directeurs = [
-        {"directeur": "VUE JONATHAN", "agences": directeur_result_agences_for_period("VUE JONATHAN", periode)},
         {"directeur": "AYACHE ADEL", "agences": directeur_result_agences_for_period("AYACHE ADEL", periode)},
         {"directeur": "EL GHAZOUANI NAHIM", "agences": directeur_result_agences_for_period("EL GHAZOUANI NAHIM", periode)},
     ]
