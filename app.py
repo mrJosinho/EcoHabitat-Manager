@@ -1949,7 +1949,7 @@ def sum_numeric_col(df, col):
     return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
 
 
-def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue, col_op=None, colonnes_commerciaux=None):
+def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, col_agence, col_vente, col_ca_magasin, col_catalogue, col_rem=None, col_op=None, colonnes_commerciaux=None):
     if df_agences.empty or not col_agence:
         return df_agences
 
@@ -3434,6 +3434,7 @@ def recompute_saved_period(period_data):
         period_data.get("col_vente"),
         period_data.get("col_ca_magasin"),
         period_data.get("col_catalogue"),
+        period_data.get("col_rem"),
         period_data.get("col_op"),
         colonnes_commerciaux,
     )
@@ -4515,7 +4516,8 @@ if role == "admin":
             col_agence,
             col_vente,
             col_ca_magasin,
-            col_catalogue
+            col_catalogue,
+            col_rem,
         )
 
         # ====================== DIRECTEURS ======================
@@ -6206,6 +6208,7 @@ if st.session_state.get("df_vendeurs") is not None:
             st.session_state.col_vente,
             st.session_state.col_ca_magasin,
             st.session_state.col_catalogue,
+            st.session_state.col_rem,
             st.session_state.col_op,
             [
                 st.session_state.col_com1,
