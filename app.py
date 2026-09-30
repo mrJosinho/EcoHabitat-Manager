@@ -17,6 +17,7 @@ import os
 import io
 import zipfile
 import unicodedata
+import copy
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from openpyxl import Workbook, load_workbook
@@ -1971,6 +1972,9 @@ def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, 
 
         ca_ok = sum_numeric_col(ok_detail, col_ca_magasin)
         ca_attente = sum_numeric_col(attente_detail, col_ca_magasin)
+        total_catalogue = sum_numeric_col(ok_detail, col_catalogue)
+        total_remise = sum_numeric_col(ok_detail, col_rem)
+        remise_pct = round(total_remise / total_catalogue * 100, 2) if total_catalogue > 0 else 0.0
         nb_ok = len(ok_detail)
         nb_total = len(ok_detail) + len(attente_detail)
         detail_global = pd.concat([ok_detail, attente_detail], ignore_index=True)
@@ -1994,6 +1998,7 @@ def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, 
         df_agences.at[idx, "ca_attente"] = round(ca_attente, 2)
         df_agences.at[idx, "ca_total"] = round(ca_ok + ca_attente, 2)
         df_agences.at[idx, "ca_magasin_ok"] = round(ca_ok, 2)
+        df_agences.at[idx, "remise_pct"] = remise_pct
         df_agences.at[idx, "bonus_malus_ok"] = round(bonus_malus_ok, 2)
         df_agences.at[idx, "nb_ok"] = nb_ok
         df_agences.at[idx, "nb_total"] = nb_total
@@ -3340,6 +3345,164 @@ def list_periodes():
     return sorted([f.stem for f in HISTORIQUE_DIR.glob("*.pkl")])
 
 
+def imported_affaire_key(row, period_data):
+    col_doc = period_data.get("col_doc")
+    col_client = period_data.get("col_client")
+    col_date = period_data.get("col_date")
+    col_agence = period_data.get("col_agence")
+    document = normalize_key(row.get(col_doc, "")) if col_doc else ""
+    if document:
+        return f"DOC|{document}"
+    return "ROW|" + "|".join([
+        normalize_key(row.get(col_client, "")) if col_client else "",
+        normalize_key(row.get(col_date, "")) if col_date else "",
+        normalize_key(row.get(col_agence, "")) if col_agence else "",
+    ])
+
+
+def find_imported_affaires(period_data, query):
+    query_key = strip_accents(normalize_key(query))
+    if not query_key:
+        return []
+
+    col_client = period_data.get("col_client")
+    col_doc = period_data.get("col_doc")
+    col_date = period_data.get("col_date")
+    col_agence = period_data.get("col_agence")
+    matches = {}
+
+    for source_key, source_label in [("df_ok", "OK"), ("df_c", "En attente")]:
+        source_df = period_data.get(source_key, pd.DataFrame())
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+            continue
+        for _, row in source_df.iterrows():
+            client = clean_visible(row.get(col_client, "")) if col_client else ""
+            document = clean_visible(row.get(col_doc, "")) if col_doc else ""
+            searchable = strip_accents(normalize_key(f"{client} {document}"))
+            if query_key not in searchable:
+                continue
+            affaire_key = imported_affaire_key(row, period_data)
+            if affaire_key not in matches:
+                matches[affaire_key] = {
+                    "key": affaire_key,
+                    "client": client,
+                    "document": document,
+                    "date": clean_visible(row.get(col_date, "")) if col_date else "",
+                    "agence": clean_visible(row.get(col_agence, "")) if col_agence else "",
+                    "sources": set(),
+                }
+            matches[affaire_key]["sources"].add(source_label)
+
+    results = []
+    for match in matches.values():
+        match["sources"] = " / ".join(sorted(match["sources"]))
+        results.append(match)
+    return sorted(results, key=lambda item: (normalize_key(item["client"]), normalize_key(item["document"])))
+
+
+def recompute_saved_period(period_data):
+    df_ok = period_data.get("df_ok", pd.DataFrame()).copy()
+    df_c = period_data.get("df_c", pd.DataFrame()).copy()
+    colonnes_commerciaux = [
+        period_data.get("col_com1"),
+        period_data.get("col_com2"),
+        period_data.get("col_com3"),
+    ]
+
+    period_data["df_vendeurs"] = recompute_df_vendeurs_indicators(
+        period_data.get("df_vendeurs", pd.DataFrame()).copy(),
+        df_ok,
+        df_c,
+        period_data.get("col_vente"),
+        period_data.get("col_catalogue"),
+        period_data.get("col_rem"),
+        period_data.get("col_op"),
+        colonnes_commerciaux,
+        period_data.get("key_cols", []),
+        period_data.get("col_client"),
+        period_data.get("col_agence"),
+        period_data.get("col_ca_magasin"),
+        period_data.get("periode"),
+    )
+    period_data["df_agences"] = recompute_df_agences_attente(
+        period_data.get("df_agences", pd.DataFrame()).copy(),
+        df_ok,
+        df_c,
+        period_data.get("key_cols", []),
+        period_data.get("col_client"),
+        period_data.get("col_agence"),
+        period_data.get("col_vente"),
+        period_data.get("col_ca_magasin"),
+        period_data.get("col_catalogue"),
+        period_data.get("col_op"),
+        colonnes_commerciaux,
+    )
+    period_data["df_directeurs"] = build_df_directeurs_for_period(
+        period_data["df_agences"],
+        period_data.get("periode"),
+    )
+    return period_data
+
+
+def exclude_imported_affaire(period_data, affaire_key, removed_by):
+    removed_rows = []
+    for source_key in ["df_ok", "df_c"]:
+        source_df = period_data.get(source_key, pd.DataFrame())
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty:
+            continue
+        mask = source_df.apply(lambda row: imported_affaire_key(row, period_data) == affaire_key, axis=1)
+        for row in source_df[mask].to_dict(orient="records"):
+            removed_rows.append({"source": source_key, "row": row})
+        period_data[source_key] = source_df[~mask].copy().reset_index(drop=True)
+
+    if not removed_rows:
+        return False
+
+    first_row = removed_rows[0]["row"]
+    archive = period_data.get("excluded_affaires", [])
+    archive = archive if isinstance(archive, list) else []
+    archive.append({
+        "id": f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}",
+        "key": affaire_key,
+        "client": clean_visible(first_row.get(period_data.get("col_client"), "")),
+        "document": clean_visible(first_row.get(period_data.get("col_doc"), "")),
+        "removed_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "removed_by": clean_visible(removed_by),
+        "rows": removed_rows,
+    })
+    period_data["excluded_affaires"] = archive
+    recompute_saved_period(period_data)
+    return True
+
+
+def restore_imported_affaire(period_data, archive_id):
+    archive = period_data.get("excluded_affaires", [])
+    if not isinstance(archive, list):
+        return False
+    entry = next((item for item in archive if item.get("id") == archive_id), None)
+    if not entry:
+        return False
+
+    for removed in entry.get("rows", []):
+        source_key = removed.get("source")
+        row = removed.get("row")
+        if source_key not in ["df_ok", "df_c"] or not isinstance(row, dict):
+            continue
+        source_df = period_data.get(source_key, pd.DataFrame())
+        period_data[source_key] = pd.concat([source_df, pd.DataFrame([row])], ignore_index=True)
+
+    period_data["excluded_affaires"] = [item for item in archive if item.get("id") != archive_id]
+    recompute_saved_period(period_data)
+    return True
+
+
+def save_and_reload_period_data(periode, period_data):
+    save_periode(periode, period_data)
+    clear_heavy_session_artifacts()
+    st.session_state.update(period_data)
+    st.session_state.pop("_indicateurs_cache", None)
+
+
 # ====================== FONCTIONS PÉRIODES / ANNUEL ======================
 
 MOIS_FR = {
@@ -4099,6 +4262,38 @@ if role == "admin":
             if c and c in df_confirm.columns and c in df_ok.columns and c not in key_cols:
                 key_cols.append(c)
 
+        existing_period_data = load_periode(periode)
+        excluded_affaires = copy.deepcopy(
+            existing_period_data.get("excluded_affaires", [])
+            if isinstance(existing_period_data, dict)
+            else []
+        )
+        if excluded_affaires:
+            exclusion_context = {
+                "col_client": col_client,
+                "col_doc": col_doc,
+                "col_date": col_date,
+                "col_agence": col_agence,
+            }
+            for excluded_entry in excluded_affaires:
+                excluded_key = excluded_entry.get("key", "")
+                refreshed_rows = []
+                for source_key, source_df in [("df_ok", df_ok), ("df_c", df_confirm)]:
+                    if source_df.empty:
+                        continue
+                    excluded_mask = source_df.apply(
+                        lambda row: imported_affaire_key(row, exclusion_context) == excluded_key,
+                        axis=1,
+                    )
+                    for excluded_row in source_df[excluded_mask].to_dict(orient="records"):
+                        refreshed_rows.append({"source": source_key, "row": excluded_row})
+                    if source_key == "df_ok":
+                        df_ok = source_df[~excluded_mask].copy().reset_index(drop=True)
+                    else:
+                        df_confirm = source_df[~excluded_mask].copy().reset_index(drop=True)
+                if refreshed_rows:
+                    excluded_entry["rows"] = refreshed_rows
+
         # ====================== VENDEURS ======================
 
         vendors = {}
@@ -4350,7 +4545,8 @@ if role == "admin":
             "col_com2": col_com2,
             "col_com3": col_com3,
             "key_cols": key_cols,
-            "periode": periode
+            "periode": periode,
+            "excluded_affaires": excluded_affaires,
         }
 
         clear_heavy_session_artifacts()
@@ -4380,6 +4576,85 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
         st.caption("Mode test : M-2 désactivé")
 
     if role == "admin" and st.session_state.get("df_vendeurs") is not None:
+        st.divider()
+        st.caption("Retirer une affaire importée")
+
+        affaire_flash = st.session_state.pop("affaire_admin_flash", "")
+        if affaire_flash:
+            st.success(affaire_flash)
+
+        periode_tools = st.session_state.get("periode", "")
+        period_admin_data = load_periode(periode_tools) if periode_tools else None
+        if period_admin_data:
+            period_admin_data = copy.deepcopy(period_admin_data)
+            affaire_query = st.text_input(
+                "Nom du client ou numéro de document",
+                key=f"affaire_search_{safe_filename(periode_tools)}",
+                placeholder="Saisir au moins une partie du nom ou du numéro",
+            ).strip()
+            affaire_matches = find_imported_affaires(period_admin_data, affaire_query) if affaire_query else []
+            match_by_key = {match["key"]: match for match in affaire_matches}
+
+            if affaire_query and not affaire_matches:
+                st.caption("Aucun dossier correspondant dans cette période.")
+            elif affaire_matches:
+                selected_affaire_key = st.selectbox(
+                    "Dossier à retirer",
+                    list(match_by_key.keys()),
+                    format_func=lambda key: " | ".join(filter(None, [
+                        match_by_key[key].get("client", ""),
+                        f"Doc. {match_by_key[key].get('document', '')}" if match_by_key[key].get("document") else "",
+                        match_by_key[key].get("date", ""),
+                        match_by_key[key].get("agence", ""),
+                        match_by_key[key].get("sources", ""),
+                    ])),
+                    key=f"affaire_delete_select_{safe_filename(periode_tools)}",
+                )
+                confirm_affaire_delete = st.checkbox(
+                    "Je confirme le retrait de ce dossier",
+                    key=f"affaire_delete_confirm_{safe_filename(periode_tools)}",
+                )
+                if st.button(
+                    "Retirer le dossier",
+                    disabled=not confirm_affaire_delete,
+                    key=f"affaire_delete_button_{safe_filename(periode_tools)}",
+                ):
+                    if exclude_imported_affaire(
+                        period_admin_data,
+                        selected_affaire_key,
+                        user.get("nom", st.session_state.get("username", "")),
+                    ):
+                        save_and_reload_period_data(periode_tools, period_admin_data)
+                        st.session_state["affaire_admin_flash"] = "Dossier retiré et calculs mis à jour."
+                        st.rerun()
+                    else:
+                        st.error("Impossible de retrouver ce dossier dans les données importées.")
+
+            excluded_affaires = period_admin_data.get("excluded_affaires", [])
+            if excluded_affaires:
+                restore_by_id = {item.get("id"): item for item in excluded_affaires if item.get("id")}
+                selected_restore_id = st.selectbox(
+                    "Dossier retiré à restaurer",
+                    list(restore_by_id.keys()),
+                    format_func=lambda archive_id: " | ".join(filter(None, [
+                        restore_by_id[archive_id].get("client", ""),
+                        f"Doc. {restore_by_id[archive_id].get('document', '')}" if restore_by_id[archive_id].get("document") else "",
+                        restore_by_id[archive_id].get("removed_at", ""),
+                        restore_by_id[archive_id].get("removed_by", ""),
+                    ])),
+                    key=f"affaire_restore_select_{safe_filename(periode_tools)}",
+                )
+                if st.button(
+                    "Restaurer le dossier",
+                    key=f"affaire_restore_button_{safe_filename(periode_tools)}",
+                ):
+                    if restore_imported_affaire(period_admin_data, selected_restore_id):
+                        save_and_reload_period_data(periode_tools, period_admin_data)
+                        st.session_state["affaire_admin_flash"] = "Dossier restauré et calculs mis à jour."
+                        st.rerun()
+                    else:
+                        st.error("Impossible de restaurer ce dossier.")
+
         st.divider()
         st.caption("💼 EVP / Paie")
 
