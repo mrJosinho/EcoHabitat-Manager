@@ -1,6 +1,7 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
+import altair as alt
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -22,6 +23,14 @@ from datetime import datetime
 from urllib.parse import quote, urlencode
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from chantier_forecast import (
+    build_chantier_forecast,
+    build_orders_from_periods,
+    load_facturation_store,
+    read_facturation_export,
+    replace_facturation_years,
+    save_facturation_store,
+)
 
 # ====================== CONFIG ======================
 
@@ -408,8 +417,14 @@ input:focus, textarea:focus, select:focus {
 # ====================== STOCKAGE LOCAL / RENDER / OVH ======================
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path("/data") if Path("/data").exists() else APP_DIR
+DATA_DIR = Path(
+    os.environ.get(
+        "ECOHABITAT_DATA_DIR",
+        "/data" if Path("/data").exists() else APP_DIR,
+    )
+)
 EVP_SEED_FILE = DATA_DIR / "evp_seed.json"
+FACTURATION_CHANTIERS_FILE = DATA_DIR / "facturation_chantiers.pkl"
 
 HISTORIQUE_DIR = DATA_DIR / "historique"
 HISTORIQUE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1205,6 +1220,18 @@ def clean_visible(s):
     if pd.isna(s):
         return ""
     return " ".join(str(s).replace(chr(160), " ").split()).strip()
+
+
+def is_joseph_admin(user_data=None, username=None):
+    user_data = user_data if isinstance(user_data, dict) else {}
+    username_key = normalize_key(
+        username if username is not None else st.session_state.get("username", "")
+    )
+    return (
+        normalize_key(user_data.get("role")) == "ADMIN"
+        and normalize_key(user_data.get("nom")) == "LUCCHINI JOSEPH"
+        and username_key in {"JOSEPH", "LUCCHINI.JOSEPH"}
+    )
 
 
 def user_photo_slug(user):
@@ -6131,6 +6158,471 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                 st.caption("Optionnel : le mail s'ouvre dans le logiciel par défaut. Il faut joindre l'Excel téléchargé.")
 
 
+def afficher_prevision_chantiers(tab):
+    with tab:
+        if not is_joseph_admin(user):
+            st.error("Cette rubrique est réservée à Joseph Lucchini.")
+            return
+
+        st.subheader("🏗️ Prévision des chantiers")
+        st.caption(
+            "Les commandes confirmées sont rapprochées des factures. "
+            "Une facture correspond à un chantier posé ; une commande non facturée reste à poser."
+        )
+
+        store = load_facturation_store(FACTURATION_CHANTIERS_FILE)
+        invoices = store.get("invoices", pd.DataFrame()).copy()
+        metadata = store.get("metadata", {})
+
+        with st.expander("📥 Importer la facturation", expanded=invoices.empty):
+            st.caption(
+                "Charge l'export cumulatif de facturation depuis le début de l'année. "
+                "L'import remplace uniquement les années présentes dans le fichier et conserve les autres années."
+            )
+            facturation_file = st.file_uploader(
+                "Fichier de facturation ProDevis", type=["xlsx"], key="chantier_facturation_upload"
+            )
+            if st.button(
+                "Importer la facturation", type="primary",
+                disabled=facturation_file is None, key="chantier_facturation_import",
+            ):
+                try:
+                    imported = read_facturation_export(
+                        facturation_file, getattr(facturation_file, "name", "facturation.xlsx")
+                    )
+                    merged = replace_facturation_years(invoices, imported)
+                    import_meta = {
+                        "imported_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                        "imported_by": user.get("nom", st.session_state.get("username", "")),
+                        "source_file": getattr(facturation_file, "name", "facturation.xlsx"),
+                        "invoice_count": int(len(imported)),
+                        "years": sorted(imported["invoice_date"].dt.year.unique().astype(int).tolist()),
+                    }
+                    save_facturation_store(FACTURATION_CHANTIERS_FILE, merged, import_meta)
+                    st.session_state["chantier_import_flash"] = (
+                        f"{len(imported)} factures importées depuis {import_meta['source_file']}."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Import impossible : {exc}")
+
+            if metadata:
+                st.caption(
+                    f"Dernier import : {metadata.get('imported_at', 'date inconnue')} · "
+                    f"{metadata.get('invoice_count', len(invoices))} factures · "
+                    f"{metadata.get('source_file', '')}"
+                )
+
+        import_flash = st.session_state.pop("chantier_import_flash", "")
+        if import_flash:
+            st.success(import_flash)
+        if invoices.empty:
+            st.info("Importe le fichier de facturation pour calculer les chantiers restant à poser.")
+            return
+
+        settings_chantiers = load_settings()
+        with st.expander("⚙️ Règles de prévision", expanded=False):
+            with st.form("chantier_forecast_settings"):
+                delivery_months = st.number_input(
+                    "Délai minimal avant pose (mois)", min_value=1, max_value=12,
+                    value=int(settings_chantiers.get("chantier_delivery_months", 2)), step=1,
+                )
+                if st.form_submit_button("Enregistrer les règles"):
+                    settings_chantiers["chantier_delivery_months"] = int(delivery_months)
+                    save_settings(settings_chantiers)
+                    st.success("Règles de prévision enregistrées.")
+                    st.rerun()
+
+        delivery_months = int(settings_chantiers.get("chantier_delivery_months", 2))
+        period_items = []
+        for period_name in list_periodes():
+            period_data = load_periode(period_name)
+            if isinstance(period_data, dict):
+                period_items.append((period_name, period_data))
+        orders = build_orders_from_periods(period_items)
+        bonlivr_rows = build_orders_from_periods(period_items, source_key="df_ok")
+        if orders.empty:
+            st.warning("Aucune commande confirmée exploitable n'a été trouvée dans l'historique.")
+            return
+
+        forecast, matches, unmatched_invoices = build_chantier_forecast(
+            orders, invoices, delivery_months=delivery_months
+        )
+        remaining = forecast[~forecast["is_installed"]].copy()
+        total_remaining = float(remaining["amount_ht"].sum()) if not remaining.empty else 0.0
+        status_summary = (
+            remaining.groupby("status")["amount_ht"].agg(["count", "sum"])
+            if not remaining.empty else pd.DataFrame(columns=["count", "sum"])
+        )
+
+        def status_values(status):
+            if status not in status_summary.index:
+                return 0, 0.0
+            row = status_summary.loc[status]
+            return int(row["count"]), float(row["sum"])
+
+        def compact_eur(value):
+            value = float(value)
+            if abs(value) >= 1_000_000:
+                return f"{value / 1_000_000:.2f} M€"
+            if abs(value) >= 1_000:
+                return f"{value / 1_000:.0f} k€"
+            return f"{value:,.0f} €".replace(",", " ")
+
+        delivery_count, delivery_amount = status_values("Attente livraison")
+        eligible_count, eligible_amount = status_values("Pose possible")
+
+        headline_cols = st.columns(2)
+        headline_cols[0].metric("Commandes sans facture", f"{len(remaining):,}".replace(",", " "))
+        headline_cols[1].metric("CA correspondant", compact_eur(total_remaining))
+
+        status_cols = st.columns(2)
+        status_cols[0].metric("Attente livraison", delivery_count, compact_eur(delivery_amount))
+        status_cols[1].metric("Pose possible", eligible_count, compact_eur(eligible_amount))
+        st.info(
+            "Le total comprend toutes les commandes sans facture, y compris les ventes récentes encore "
+            "en attente de livraison. La catégorie « Pose possible » correspond aux dossiers ayant dépassé "
+            "le délai minimal, sans qu'un retard automatique leur soit attribué."
+        )
+        st.caption(
+            f"Date minimale de pose : date de vente + {delivery_months} mois."
+        )
+
+        matched_invoice_numbers = set(matches["invoice_no"]) if not matches.empty else set()
+        n1_invoice_numbers = (
+            set(unmatched_invoices.loc[
+                unmatched_invoices["match_status"] == "Vente N-1 présumée", "invoice_no"
+            ])
+            if not unmatched_invoices.empty else set()
+        )
+        invoice_breakdown = invoices[["invoice_no", "amount_ht"]].copy()
+        invoice_breakdown["Catégorie"] = "À contrôler"
+        invoice_breakdown.loc[
+            invoice_breakdown["invoice_no"].isin(matched_invoice_numbers), "Catégorie"
+        ] = "Ventes 2026 rapprochées"
+        invoice_breakdown.loc[
+            invoice_breakdown["invoice_no"].isin(n1_invoice_numbers), "Catégorie"
+        ] = "Ventes N-1 présumées"
+        invoice_chart_data = (
+            invoice_breakdown.groupby("Catégorie", as_index=False)
+            .agg(**{"Montant HT": ("amount_ht", "sum"), "Factures": ("invoice_no", "nunique")})
+        )
+        total_invoiced = float(invoice_chart_data["Montant HT"].sum())
+        n1_invoiced = float(
+            invoice_chart_data.loc[
+                invoice_chart_data["Catégorie"] == "Ventes N-1 présumées", "Montant HT"
+            ].sum()
+        )
+        comparison_order = [
+            "Commandes confirmées totales",
+            "BONLIVR total",
+            "Facturation totale",
+            "Dont facturation N-1",
+            "Commandes sans facture",
+            "Attente livraison",
+            "Pose possible",
+        ]
+        comparison_colors = ["#326273", "#7A6A9D", "#5EAF2C", "#E59A25", "#D65F5F", "#D9A21B", "#4C78A8"]
+        comparison_data = pd.DataFrame({
+            "Indicateur": comparison_order,
+            "Montant HT": [
+                float(orders["amount_ht"].sum()),
+                float(bonlivr_rows["amount_ht"].sum()) if not bonlivr_rows.empty else 0.0,
+                total_invoiced,
+                n1_invoiced,
+                total_remaining,
+                delivery_amount,
+                eligible_amount,
+            ],
+        })
+        comparison_data["Montant affiché"] = comparison_data["Montant HT"].map(compact_eur)
+        comparison_max = max(float(comparison_data["Montant HT"].max()), 1.0)
+        comparison_bar = alt.Chart(comparison_data).mark_bar(cornerRadiusEnd=4, height=25).encode(
+            x=alt.X(
+                "Montant HT:Q",
+                title="Montant HT",
+                scale=alt.Scale(domain=[0, comparison_max * 1.18]),
+                axis=alt.Axis(format="~s"),
+            ),
+            y=alt.Y("Indicateur:N", sort=comparison_order, title=None),
+            color=alt.Color(
+                "Indicateur:N",
+                scale=alt.Scale(domain=comparison_order, range=comparison_colors),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Indicateur:N"),
+                alt.Tooltip("Montant HT:Q", format=",.2f"),
+            ],
+        )
+        comparison_labels = alt.Chart(comparison_data).mark_text(
+            align="left", baseline="middle", dx=6, fontWeight="bold"
+        ).encode(
+            x=alt.X("Montant HT:Q"),
+            y=alt.Y("Indicateur:N", sort=comparison_order),
+            text=alt.Text("Montant affiché:N"),
+        )
+        st.markdown("#### Comparaison des commandes et de la facturation")
+        st.altair_chart(
+            (comparison_bar + comparison_labels).properties(height=280),
+            use_container_width=True,
+        )
+        st.caption(
+            "« BONLIVR total » correspond aux bons de livraison déjà importés, dédupliqués par numéro de document. "
+            "Les commandes sans facture se répartissent entre « Attente livraison » et « Pose possible ». "
+            "« Dont facturation N-1 » est inclus dans la facturation totale. Celle-ci ne se soustrait donc pas "
+            "directement aux commandes de 2026."
+        )
+
+        monthly_install_ratio = (
+            forecast.groupby("source_period", as_index=False)
+            .agg(
+                **{
+                    "CA vendu": ("amount_ht", "sum"),
+                    "CA posé": ("amount_ht", lambda values: float(
+                        values[forecast.loc[values.index, "is_installed"]].sum()
+                    )),
+                    "Ventes": ("order_key", "size"),
+                    "Dossiers posés": ("is_installed", "sum"),
+                }
+            )
+            .rename(columns={"source_period": "Période commerciale"})
+        )
+        monthly_install_ratio["Ratio posé %"] = np.where(
+            monthly_install_ratio["CA vendu"] > 0,
+            monthly_install_ratio["CA posé"] / monthly_install_ratio["CA vendu"] * 100,
+            0.0,
+        )
+        monthly_install_ratio["_tri"] = monthly_install_ratio["Période commerciale"].map(evp_period_sort_key)
+        monthly_install_ratio = monthly_install_ratio.sort_values("_tri").drop(columns="_tri")
+        ratio_period_order = monthly_install_ratio["Période commerciale"].tolist()
+        ratio_chart = alt.Chart(monthly_install_ratio).mark_bar(
+            color="#5EAF2C", cornerRadiusTopLeft=4, cornerRadiusTopRight=4
+        ).encode(
+            x=alt.X(
+                "Période commerciale:N",
+                sort=ratio_period_order,
+                title=None,
+                axis=alt.Axis(labelAngle=-35),
+            ),
+            y=alt.Y(
+                "Ratio posé %:Q",
+                title="Part du CA vendu déjà posé",
+                scale=alt.Scale(domain=[0, 100]),
+                axis=alt.Axis(format=".0f", labelExpr="datum.label + ' %'"),
+            ),
+            tooltip=[
+                alt.Tooltip("Période commerciale:N"),
+                alt.Tooltip("Ratio posé %:Q", format=".1f"),
+                alt.Tooltip("CA vendu:Q", format=",.2f"),
+                alt.Tooltip("CA posé:Q", format=",.2f"),
+                alt.Tooltip("Ventes:Q", format="d"),
+                alt.Tooltip("Dossiers posés:Q", format="d"),
+            ],
+        )
+        ratio_labels = alt.Chart(monthly_install_ratio).mark_text(
+            dy=-8, fontWeight="bold", color="#26313D"
+        ).encode(
+            x=alt.X("Période commerciale:N", sort=ratio_period_order),
+            y=alt.Y("Ratio posé %:Q"),
+            text=alt.Text("Ratio posé %:Q", format=".0f"),
+        )
+        st.markdown("#### Ratio ventes posées par mois")
+        st.altair_chart((ratio_chart + ratio_labels).properties(height=330), use_container_width=True)
+        st.caption(
+            "Ratio en montant HT : CA des commandes ayant une facture ÷ CA total des commandes de la période. "
+            "Dans cette analyse, une facture signifie que le chantier est posé."
+        )
+
+        with st.expander("🔎 Contrôler le total par période commerciale", expanded=False):
+            st.caption(
+                "La période commerciale correspond au mois dans lequel la vente a été enregistrée. "
+                "La pose possible est calculée séparément à partir de la date du document + délai minimal."
+            )
+            period_control = (
+                remaining.groupby("source_period", as_index=False)
+                .agg(
+                    Commandes=("order_key", "size"),
+                    **{"Montant HT": ("amount_ht", "sum")},
+                    **{"Pose possible": ("status", lambda values: int((values == "Pose possible").sum()))},
+                )
+                .rename(columns={"source_period": "Période commerciale"})
+            )
+            period_control["_tri"] = period_control["Période commerciale"].map(evp_period_sort_key)
+            period_control = period_control.sort_values("_tri").drop(columns="_tri").reset_index(drop=True)
+            st.caption("Clique sur une ligne pour afficher le détail de ses commandes.")
+            period_selection = st.dataframe(
+                period_control,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="chantier_period_control",
+                column_config={
+                    "Montant HT": st.column_config.NumberColumn(format="%.2f €"),
+                },
+            )
+            selected_period_rows = period_selection.selection.rows
+            if selected_period_rows:
+                selected_period = period_control.iloc[selected_period_rows[0]]["Période commerciale"]
+                period_detail = remaining[remaining["source_period"] == selected_period][[
+                    "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
+                    "agency", "sellers", "amount_ht",
+                ]].copy()
+                period_detail = period_detail.rename(columns={
+                    "status": "État",
+                    "client_ref": "Client / Référence affaire",
+                    "order_no": "N° commande",
+                    "sale_date": "Date document",
+                    "earliest_install_date": "Pose possible à partir du",
+                    "agency": "Agence",
+                    "sellers": "Commercial(aux)",
+                    "amount_ht": "Montant HT",
+                }).sort_values(["État", "Date document", "Agence"], na_position="last")
+                st.markdown(f"##### Commandes de {selected_period}")
+                st.dataframe(
+                    period_detail,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Date document": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                        "Pose possible à partir du": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                        "Montant HT": st.column_config.NumberColumn(format="%.2f €"),
+                    },
+                )
+                period_export = period_detail.copy()
+                for date_column in ["Date document", "Pose possible à partir du"]:
+                    if date_column in period_export.columns:
+                        period_export[date_column] = pd.to_datetime(
+                            period_export[date_column], errors="coerce"
+                        ).dt.date
+
+                period_export_buffer = io.BytesIO()
+                with pd.ExcelWriter(period_export_buffer, engine="openpyxl") as writer:
+                    period_export.to_excel(writer, index=False, sheet_name="Commandes")
+                    worksheet = writer.book["Commandes"]
+                    worksheet.freeze_panes = "A2"
+                    worksheet.auto_filter.ref = worksheet.dimensions
+                    for column_cells in worksheet.columns:
+                        max_length = max(
+                            len(str(cell.value)) if cell.value is not None else 0
+                            for cell in column_cells
+                        )
+                        worksheet.column_dimensions[column_cells[0].column_letter].width = min(
+                            max(max_length + 2, 12), 45
+                        )
+                    amount_column = period_export.columns.get_loc("Montant HT") + 1
+                    for row_number in range(2, worksheet.max_row + 1):
+                        worksheet.cell(row_number, amount_column).number_format = '#,##0.00 [$€-fr-FR]'
+
+                st.download_button(
+                    "📥 Télécharger le détail Excel",
+                    data=period_export_buffer.getvalue(),
+                    file_name=f"commandes_non_facturees_{safe_filename(selected_period)}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_chantier_period_{safe_filename(selected_period)}",
+                    on_click="ignore",
+                )
+
+        filter_cols = st.columns([1, 1, 1.5])
+        agencies = sorted(value for value in remaining["agency"].dropna().unique() if clean_visible(value))
+        status_order = [
+            "Attente livraison", "Pose possible", "Date à contrôler"
+        ]
+        statuses = [status for status in status_order if status in set(remaining["status"])]
+        selected_agencies = filter_cols[0].multiselect(
+            "Agences", agencies, default=agencies, key="chantier_filter_agencies"
+        )
+        selected_statuses = filter_cols[1].multiselect(
+            "États", statuses, default=statuses, key="chantier_filter_statuses"
+        )
+        chantier_query = filter_cols[2].text_input(
+            "Rechercher un client, document ou vendeur", key="chantier_filter_query"
+        ).strip()
+
+        filtered = remaining.copy()
+        filtered = filtered[filtered["agency"].isin(selected_agencies)] if selected_agencies else filtered.iloc[0:0]
+        filtered = filtered[filtered["status"].isin(selected_statuses)] if selected_statuses else filtered.iloc[0:0]
+        if chantier_query:
+            search_key = strip_accents(normalize_key(chantier_query))
+            search_values = filtered.apply(
+                lambda row: strip_accents(normalize_key(
+                    f"{row.get('client_ref', '')} {row.get('order_no', '')} {row.get('sellers', '')}"
+                )), axis=1,
+            )
+            filtered = filtered[search_values.str.contains(search_key, regex=False)]
+
+        st.markdown("#### Montant à poser par agence")
+        by_agency = (
+            filtered.groupby("agency", as_index=False)["amount_ht"].sum()
+            .sort_values("amount_ht", ascending=False)
+            .rename(columns={"agency": "Agence", "amount_ht": "Montant HT"})
+        )
+        if by_agency.empty:
+            st.info("Aucune donnée pour ces filtres.")
+        else:
+            st.bar_chart(by_agency, x="Agence", y="Montant HT", use_container_width=True)
+
+        st.markdown("#### Détail des chantiers restant à poser")
+        detail = filtered[[
+            "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
+            "agency", "sellers", "amount_ht", "source_period",
+        ]].copy()
+        detail = detail.rename(columns={
+            "status": "État", "client_ref": "Client / Référence affaire", "order_no": "N° commande",
+            "sale_date": "Date vente", "earliest_install_date": "Pose possible à partir du",
+            "agency": "Agence", "sellers": "Commercial(aux)", "amount_ht": "Montant HT",
+            "source_period": "Période source",
+        }).sort_values(["Pose possible à partir du", "Agence"], na_position="last")
+        st.dataframe(
+            detail, use_container_width=True, hide_index=True,
+            column_config={
+                "Date vente": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "Pose possible à partir du": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                "Montant HT": st.column_config.NumberColumn(format="%.2f €"),
+            },
+        )
+
+        if unmatched_invoices.empty:
+            n1_invoices = pd.DataFrame()
+            ambiguous_invoices = pd.DataFrame()
+        else:
+            n1_invoices = unmatched_invoices[unmatched_invoices["match_status"] == "Vente N-1 présumée"].copy()
+            ambiguous_invoices = unmatched_invoices[unmatched_invoices["match_status"] != "Vente N-1 présumée"].copy()
+
+        with st.expander(f"📦 Chantiers posés rapprochés ({len(matches)})", expanded=False):
+            if matches.empty:
+                st.caption("Aucun rapprochement automatique.")
+            else:
+                st.dataframe(matches, use_container_width=True, hide_index=True)
+
+        with st.expander(f"🕘 Facturation provenant de N-1 ({len(n1_invoices)})", expanded=False):
+            if n1_invoices.empty:
+                st.caption("Aucune facture classée en N-1 présumée.")
+            else:
+                n1_display = n1_invoices[[
+                    "invoice_no", "invoice_date", "client_ref", "agency", "amount_ht", "sale_month_label"
+                ]].rename(columns={
+                    "invoice_no": "N° facture", "invoice_date": "Date facture",
+                    "client_ref": "Client / Référence affaire", "agency": "Agence",
+                    "amount_ht": "Montant HT", "sale_month_label": "Mois de vente déclaré",
+                })
+                st.dataframe(n1_display, use_container_width=True, hide_index=True)
+
+        with st.expander(f"⚠️ Rapprochements à contrôler ({len(ambiguous_invoices)})", expanded=False):
+            if ambiguous_invoices.empty:
+                st.caption("Aucune anomalie de rapprochement.")
+            else:
+                anomaly_display = ambiguous_invoices[[
+                    "match_status", "invoice_no", "invoice_date", "client_ref", "agency", "amount_ht"
+                ]].rename(columns={
+                    "match_status": "Anomalie", "invoice_no": "N° facture",
+                    "invoice_date": "Date facture", "client_ref": "Client / Référence affaire",
+                    "agency": "Agence", "amount_ht": "Montant HT",
+                })
+                st.dataframe(anomaly_display, use_container_width=True, hide_index=True)
+
+
 # ====================== AFFICHAGE DONNÉES ======================
 
 if st.session_state.get("df_vendeurs") is not None:
@@ -6292,6 +6784,10 @@ if st.session_state.get("df_vendeurs") is not None:
             "💼 EVP / Paie",
             "⚙️ Utilisateurs"
         ]
+        if is_joseph_admin(user):
+            pages.insert(7, "🏗️ Prévision chantiers")
+        if st.session_state.get("active_page_admin") not in pages:
+            st.session_state["active_page_admin"] = pages[0]
         active_page = st.pills(
             "Navigation",
             pages,
@@ -7063,6 +7559,8 @@ if st.session_state.get("df_vendeurs") is not None:
 
         if active_page == "⏳ En attente":
             afficher_dossiers_en_attente(st.container())
+        if active_page == "🏗️ Prévision chantiers" and is_joseph_admin(user):
+            afficher_prevision_chantiers(st.container())
         if active_page == "💼 EVP / Paie":
             afficher_evp_paie(st.container(), df_vendeurs_all, df_directeurs)
         if active_page == "📆 Annuel":
