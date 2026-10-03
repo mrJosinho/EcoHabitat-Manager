@@ -6240,7 +6240,6 @@ def afficher_prevision_chantiers(tab):
             if isinstance(period_data, dict):
                 period_items.append((period_name, period_data))
         orders = build_orders_from_periods(period_items)
-        bonlivr_rows = build_orders_from_periods(period_items, source_key="df_ok")
         if orders.empty:
             st.warning("Aucune commande confirmée exploitable n'a été trouvée dans l'historique.")
             return
@@ -6315,19 +6314,17 @@ def afficher_prevision_chantiers(tab):
         )
         comparison_order = [
             "Commandes confirmées totales",
-            "BONLIVR total",
             "Facturation totale",
             "Dont facturation N-1",
             "Commandes sans facture",
             "Attente livraison",
             "Pose possible",
         ]
-        comparison_colors = ["#326273", "#7A6A9D", "#5EAF2C", "#E59A25", "#D65F5F", "#D9A21B", "#4C78A8"]
+        comparison_colors = ["#326273", "#5EAF2C", "#E59A25", "#D65F5F", "#D9A21B", "#4C78A8"]
         comparison_data = pd.DataFrame({
             "Indicateur": comparison_order,
             "Montant HT": [
                 float(orders["amount_ht"].sum()),
-                float(bonlivr_rows["amount_ht"].sum()) if not bonlivr_rows.empty else 0.0,
                 total_invoiced,
                 n1_invoiced,
                 total_remaining,
@@ -6368,7 +6365,6 @@ def afficher_prevision_chantiers(tab):
             use_container_width=True,
         )
         st.caption(
-            "« BONLIVR total » correspond aux bons de livraison déjà importés, dédupliqués par numéro de document. "
             "Les commandes sans facture se répartissent entre « Attente livraison » et « Pose possible ». "
             "« Dont facturation N-1 » est inclus dans la facturation totale. Celle-ci ne se soustrait donc pas "
             "directement aux commandes de 2026."
