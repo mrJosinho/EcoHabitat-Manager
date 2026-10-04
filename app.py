@@ -6158,6 +6158,133 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                 st.caption("Optionnel : le mail s'ouvre dans le logiciel par défaut. Il faut joindre l'Excel téléchargé.")
 
 
+def create_chantier_remaining_workbook(remaining):
+    detail_columns = [
+        "source_period", "status", "client_ref", "order_no", "sale_date",
+        "earliest_install_date", "agency", "sellers", "amount_ht",
+    ]
+    detail = remaining[detail_columns].copy()
+    detail = detail.rename(columns={
+        "source_period": "Période commerciale",
+        "status": "État",
+        "client_ref": "Client / Référence affaire",
+        "order_no": "N° commande",
+        "sale_date": "Date document",
+        "earliest_install_date": "Pose possible à partir du",
+        "agency": "Agence",
+        "sellers": "Commercial(aux)",
+        "amount_ht": "Montant HT",
+    })
+    detail["_tri"] = detail["Période commerciale"].map(evp_period_sort_key)
+    detail = detail.sort_values(
+        ["_tri", "État", "Date document", "Agence"], na_position="last"
+    ).drop(columns="_tri")
+
+    summary = (
+        detail.groupby(["Période commerciale", "État"], as_index=False)
+        .agg(**{"Nombre de commandes": ("N° commande", "size"), "Montant HT": ("Montant HT", "sum")})
+    )
+    summary["_tri"] = summary["Période commerciale"].map(evp_period_sort_key)
+    summary = summary.sort_values(["_tri", "État"]).drop(columns="_tri")
+
+    wb = Workbook()
+    header_fill = PatternFill("solid", fgColor="156D86")
+    header_font = Font(color="FFFFFF", bold=True)
+    total_fill = PatternFill("solid", fgColor="DDEBF7")
+    border = Border(
+        left=Side(style="thin", color="D9E1E8"),
+        right=Side(style="thin", color="D9E1E8"),
+        top=Side(style="thin", color="D9E1E8"),
+        bottom=Side(style="thin", color="D9E1E8"),
+    )
+
+    def excel_value(value):
+        if pd.isna(value):
+            return ""
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime()
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    def populate_sheet(ws, frame, currency_columns=None, date_columns=None):
+        currency_columns = set(currency_columns or [])
+        date_columns = set(date_columns or [])
+        ws.append(list(frame.columns))
+        for row in frame.itertuples(index=False, name=None):
+            ws.append([excel_value(value) for value in row])
+
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        for row in ws.iter_rows(min_row=2):
+            for cell in row:
+                cell.border = border
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        for column_index, column_name in enumerate(frame.columns, start=1):
+            if column_name in currency_columns:
+                for row_index in range(2, ws.max_row + 1):
+                    ws.cell(row_index, column_index).number_format = '#,##0.00 [$€-fr-FR]'
+            if column_name in date_columns:
+                for row_index in range(2, ws.max_row + 1):
+                    ws.cell(row_index, column_index).number_format = "dd/mm/yyyy"
+
+            max_length = len(str(column_name))
+            for cell in ws.iter_cols(
+                min_col=column_index, max_col=column_index, min_row=2, max_row=ws.max_row
+            ):
+                for item in cell:
+                    max_length = max(max_length, len(str(item.value)) if item.value is not None else 0)
+            ws.column_dimensions[ws.cell(1, column_index).column_letter].width = min(
+                max(max_length + 2, 12), 42
+            )
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        ws.row_dimensions[1].height = 30
+
+    summary_ws = wb.active
+    summary_ws.title = "Synthèse"
+    populate_sheet(summary_ws, summary, currency_columns={"Montant HT"})
+    total_row = summary_ws.max_row + 2
+    summary_ws.cell(total_row, 1, "TOTAL")
+    summary_ws.cell(total_row, 3, int(len(detail)))
+    summary_ws.cell(total_row, 4, float(detail["Montant HT"].sum()))
+    for cell in summary_ws[total_row]:
+        cell.fill = total_fill
+        cell.font = Font(bold=True)
+        cell.border = border
+    summary_ws.cell(total_row, 4).number_format = '#,##0.00 [$€-fr-FR]'
+
+    all_ws = wb.create_sheet("Toutes les commandes")
+    populate_sheet(
+        all_ws,
+        detail,
+        currency_columns={"Montant HT"},
+        date_columns={"Date document", "Pose possible à partir du"},
+    )
+
+    for period_name in detail["Période commerciale"].drop_duplicates():
+        period_detail = detail[detail["Période commerciale"] == period_name].copy()
+        period_detail = period_detail.drop(columns="Période commerciale")
+        sheet_name = safe_filename(period_name)[:31] or "Mois"
+        period_ws = wb.create_sheet(sheet_name)
+        populate_sheet(
+            period_ws,
+            period_detail,
+            currency_columns={"Montant HT"},
+            date_columns={"Date document", "Pose possible à partir du"},
+        )
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
 def afficher_prevision_chantiers(tab):
     with tab:
         if not is_joseph_admin(user):
@@ -6285,6 +6412,19 @@ def afficher_prevision_chantiers(tab):
         )
         st.caption(
             f"Date minimale de pose : date de vente + {delivery_months} mois."
+        )
+        remaining_xlsx = create_chantier_remaining_workbook(remaining)
+        st.download_button(
+            "📥 Télécharger toutes les commandes non posées",
+            data=remaining_xlsx,
+            file_name=f"commandes_non_posees_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_all_uninstalled_orders",
+            on_click="ignore",
+        )
+        st.caption(
+            "Le fichier contient une synthèse par mois et par état, une liste complète, "
+            "puis une feuille détaillée pour chaque mois commercial."
         )
 
         matched_invoice_numbers = set(matches["invoice_no"]) if not matches.empty else set()
