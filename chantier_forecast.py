@@ -12,6 +12,7 @@ import pandas as pd
 
 FACTURATION_COLUMNS = [
     "invoice_no",
+    "order_no",
     "invoice_date",
     "client_ref",
     "agency",
@@ -67,6 +68,17 @@ def read_facturation_export(source, source_name=""):
     col_amount = _find_column(df, ["TOTAL HT VENTES"]) or _column_at(df, 16)
     col_agency = _find_column(df, ["AGENCE"]) or _column_at(df, 50)
     col_sale_month = _find_column(df, ["MOIS", "VENTE"]) or _column_at(df, 49)
+    col_order = (
+        _find_column(df, ["COMMANDE", "CORRESPONDANT"])
+        or _find_column(df, ["NUM", "COMMANDE"])
+    )
+    fallback_order_column = _column_at(df, 52)
+    if (
+        not col_order
+        and fallback_order_column
+        and "COMMANDE" in normalize_text(fallback_order_column)
+    ):
+        col_order = fallback_order_column
 
     required = {
         "Client / référence affaire": col_client,
@@ -81,6 +93,7 @@ def read_facturation_export(source, source_name=""):
 
     parsed = pd.DataFrame({
         "invoice_no": df[col_invoice].map(clean_text),
+        "order_no": df[col_order].map(clean_text) if col_order else "",
         "invoice_date": pd.to_datetime(df[col_date], errors="coerce"),
         "client_ref": df[col_client].map(clean_text),
         "agency": df[col_agency].map(clean_text).str.upper(),
@@ -102,6 +115,11 @@ def read_facturation_export(source, source_name=""):
     parsed["client_key"] = parsed["client_ref"].map(normalize_text)
     parsed["agency_key"] = parsed["agency"].map(normalize_text)
     parsed["match_key"] = parsed["client_key"] + "|" + parsed["agency_key"]
+    parsed["order_key"] = parsed["order_no"].map(normalize_text)
+    parsed.loc[
+        ~parsed["order_key"].str.match(r"^CD", case=False, na=False),
+        ["order_no", "order_key"],
+    ] = ""
     parsed = parsed.drop_duplicates(subset=["invoice_no"], keep="last").reset_index(drop=True)
 
     if parsed.empty:
@@ -278,46 +296,77 @@ def match_invoices_to_orders(orders, invoices):
         unmatched = invoices.copy()
         unmatched["match_status"] = "Vente N-1 présumée"
         unmatched["matched_order_key"] = ""
-        return pd.DataFrame(columns=["invoice_no", "order_key", "confidence"]), unmatched
+        return pd.DataFrame(columns=[
+            "invoice_no", "invoice_order_no", "order_key", "confidence"
+        ]), unmatched
 
     matches = []
     unmatched_rows = []
     grouped_orders = {key: group for key, group in orders.groupby("match_key", dropna=False)}
+    grouped_order_numbers = {
+        key: group
+        for key, group in orders[orders["order_key"].str.match(r"^CD", case=False, na=False)].groupby(
+            "order_key", dropna=False
+        )
+    }
 
     for _, invoice in invoices.iterrows():
-        candidates = grouped_orders.get(invoice.get("match_key"), pd.DataFrame())
-        if candidates.empty:
-            unmatched_status = infer_unmatched_invoice_status(invoice)
-            selected = None
-            if unmatched_status != "Vente N-1 présumée":
-                selected = _safe_label_candidates(invoice, orders)
-            if selected is None:
+        invoice_order_key = normalize_text(
+            invoice.get("order_key", "") or invoice.get("order_no", "")
+        )
+        if invoice_order_key.startswith("CD"):
+            direct_candidates = grouped_order_numbers.get(invoice_order_key, pd.DataFrame())
+            if direct_candidates.empty:
                 row = invoice.to_dict()
-                row["match_status"] = unmatched_status
+                inferred_status = infer_unmatched_invoice_status(invoice)
+                row["match_status"] = (
+                    inferred_status
+                    if inferred_status == "Vente N-1 présumée"
+                    else "N° commande introuvable"
+                )
                 row["matched_order_key"] = ""
                 unmatched_rows.append(row)
                 continue
-            confidence = "Composite libellé"
-
-        elif len(candidates) == 1:
-            selected = candidates.iloc[0]
-            confidence = "Automatique"
+            selected = direct_candidates.iloc[0]
+            confidence = "N° commande"
         else:
-            scored = [(_candidate_score(invoice, candidate), idx, candidate) for idx, candidate in candidates.iterrows()]
-            scored.sort(key=lambda item: item[0], reverse=True)
-            best_score = scored[0][0]
-            tied = [item for item in scored if item[0] == best_score]
-            if best_score < 3 or len(tied) != 1:
-                row = invoice.to_dict()
-                row["match_status"] = "Rapprochement ambigu"
-                row["matched_order_key"] = ""
-                unmatched_rows.append(row)
-                continue
-            selected = scored[0][2]
-            confidence = "Composite"
+            candidates = grouped_orders.get(invoice.get("match_key"), pd.DataFrame())
+            if candidates.empty:
+                unmatched_status = infer_unmatched_invoice_status(invoice)
+                selected = None
+                if unmatched_status != "Vente N-1 présumée":
+                    selected = _safe_label_candidates(invoice, orders)
+                if selected is None:
+                    row = invoice.to_dict()
+                    row["match_status"] = unmatched_status
+                    row["matched_order_key"] = ""
+                    unmatched_rows.append(row)
+                    continue
+                confidence = "Composite libellé"
+
+            elif len(candidates) == 1:
+                selected = candidates.iloc[0]
+                confidence = "Automatique"
+            else:
+                scored = [
+                    (_candidate_score(invoice, candidate), idx, candidate)
+                    for idx, candidate in candidates.iterrows()
+                ]
+                scored.sort(key=lambda item: item[0], reverse=True)
+                best_score = scored[0][0]
+                tied = [item for item in scored if item[0] == best_score]
+                if best_score < 3 or len(tied) != 1:
+                    row = invoice.to_dict()
+                    row["match_status"] = "Rapprochement ambigu"
+                    row["matched_order_key"] = ""
+                    unmatched_rows.append(row)
+                    continue
+                selected = scored[0][2]
+                confidence = "Composite"
 
         matches.append({
             "invoice_no": invoice.get("invoice_no", ""),
+            "invoice_order_no": invoice.get("order_no", ""),
             "invoice_date": invoice.get("invoice_date"),
             "invoice_amount_ht": float(invoice.get("amount_ht", 0.0)),
             "order_key": selected.get("order_key", ""),

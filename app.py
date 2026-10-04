@@ -6633,6 +6633,7 @@ def afficher_prevision_chantiers(tab):
                         "imported_by": user.get("nom", st.session_state.get("username", "")),
                         "source_file": getattr(facturation_file, "name", "facturation.xlsx"),
                         "invoice_count": int(len(imported)),
+                        "order_link_count": int(imported.get("order_key", pd.Series(dtype=str)).ne("").sum()),
                         "years": sorted(imported["invoice_date"].dt.year.unique().astype(int).tolist()),
                     }
                     save_facturation_store(FACTURATION_CHANTIERS_FILE, merged, import_meta)
@@ -6647,6 +6648,7 @@ def afficher_prevision_chantiers(tab):
                 st.caption(
                     f"Dernier import : {metadata.get('imported_at', 'date inconnue')} · "
                     f"{metadata.get('invoice_count', len(invoices))} factures · "
+                    f"{metadata.get('order_link_count', 0)} n° de commande exploitables · "
                     f"{metadata.get('source_file', '')}"
                 )
 
