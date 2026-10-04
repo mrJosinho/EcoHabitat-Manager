@@ -6162,14 +6162,23 @@ def afficher_evp_paie(tab, df_vendeurs_source, df_directeurs_source):
                 st.caption("Optionnel : le mail s'ouvre dans le logiciel par défaut. Il faut joindre l'Excel téléchargé.")
 
 
+CHANTIER_PRODUCT_CATEGORIES = [
+    "MEN",
+    "PRODUIT EXTERIEUR",
+    "CUMULE MEN + PRODUIT EXTERIEUR",
+]
+CHANTIER_UNCLASSIFIED = "NON CLASSE"
+
+
 def create_chantier_remaining_workbook(remaining):
     detail_columns = [
-        "source_period", "status", "client_ref", "order_no", "sale_date",
+        "source_period", "product_category", "status", "client_ref", "order_no", "sale_date",
         "earliest_install_date", "agency", "sellers", "amount_ht",
     ]
     detail = remaining[detail_columns].copy()
     detail = detail.rename(columns={
         "source_period": "Période commerciale",
+        "product_category": "Type de dossier",
         "status": "État",
         "client_ref": "Client / Référence affaire",
         "order_no": "N° commande",
@@ -6181,7 +6190,7 @@ def create_chantier_remaining_workbook(remaining):
     })
     detail["_tri"] = detail["Période commerciale"].map(evp_period_sort_key)
     detail = detail.sort_values(
-        ["_tri", "État", "Date document", "Agence"], na_position="last"
+        ["_tri", "Type de dossier", "État", "Date document", "Agence"], na_position="last"
     ).drop(columns="_tri")
 
     status_order = ["Attente livraison", "Pose possible", "Date à contrôler"]
@@ -6305,11 +6314,16 @@ def create_chantier_remaining_workbook(remaining):
             for column_index, value in enumerate(row, start=1):
                 cell = ws.cell(row_index, column_index, excel_value(value))
                 cell.border = border
-                cell.alignment = Alignment(vertical="top", wrap_text=column_index in {3, 8})
+                column_name = frame.columns[column_index - 1]
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=column_name in {"Client / Référence affaire", "Commercial(aux)"},
+                )
             ws.row_dimensions[row_index].height = 24
 
         column_widths = {
             "Période commerciale": 18,
+            "Type de dossier": 31,
             "État": 19,
             "Client / Référence affaire": 40,
             "N° commande": 19,
@@ -6449,6 +6463,117 @@ def create_chantier_remaining_workbook(remaining):
     )
     dashboard.oddFooter.center.text = "Tableau de bord EcoHabitat - Page &P / &N"
 
+    category_rows = []
+    category_order = [*CHANTIER_PRODUCT_CATEGORIES, CHANTIER_UNCLASSIFIED]
+    for category in category_order:
+        category_detail = detail[detail["Type de dossier"] == category]
+        if category_detail.empty:
+            continue
+        category_row = {
+            "Type de dossier": category,
+            "Total dossiers": int(len(category_detail)),
+            "Montant total HT": float(category_detail["Montant HT"].sum()),
+        }
+        for status in status_order:
+            status_detail = category_detail[category_detail["État"] == status]
+            if status == "Attente livraison":
+                label = "attente"
+            elif status == "Pose possible":
+                label = "pose possible"
+            else:
+                label = "à contrôler"
+            category_row[f"Nb {label}"] = int(len(status_detail))
+            category_row[f"Montant {label}"] = float(status_detail["Montant HT"].sum())
+        category_rows.append(category_row)
+    category_summary = pd.DataFrame(category_rows, columns=[
+        "Type de dossier", "Total dossiers", "Montant total HT",
+        "Nb attente", "Nb pose possible", "Nb à contrôler",
+        "Montant attente", "Montant pose possible", "Montant à contrôler",
+    ])
+    category_ws = wb.create_sheet("Statistiques catégories")
+    category_ws.sheet_view.showGridLines = False
+    category_ws.merge_cells("A1:T2")
+    category_ws["A1"] = "STATISTIQUES DES COMMANDES NON POSÉES PAR TYPE DE DOSSIER"
+    category_ws["A1"].fill = PatternFill("solid", fgColor=navy)
+    category_ws["A1"].font = Font(color=white, bold=True, size=18)
+    category_ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    category_ws.merge_cells("A3:T3")
+    category_ws["A3"] = (
+        "MEN, Produit extérieur, dossiers cumulés et dossiers restant à classer"
+    )
+    category_ws["A3"].font = Font(color="5B6573", italic=True)
+    category_ws["A3"].alignment = Alignment(horizontal="center")
+    category_header_row = 5
+    for column_index, column_name in enumerate(category_summary.columns, start=1):
+        cell = category_ws.cell(category_header_row, column_index, column_name)
+        cell.fill = PatternFill("solid", fgColor=teal)
+        cell.font = Font(color=white, bold=True, size=9)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+        category_ws.column_dimensions[get_column_letter(column_index)].width = (
+            31 if column_index == 1 else 16
+        )
+    category_ws.row_dimensions[category_header_row].height = 36
+    for row_index, row in enumerate(
+        category_summary.itertuples(index=False, name=None), start=category_header_row + 1
+    ):
+        for column_index, value in enumerate(row, start=1):
+            cell = category_ws.cell(row_index, column_index, excel_value(value))
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            if column_index in {3, 7, 8, 9}:
+                cell.number_format = '#,##0 [$€-fr-FR]'
+        if row_index % 2 == 0:
+            for cell in category_ws[row_index][:len(category_summary.columns)]:
+                cell.fill = PatternFill("solid", fgColor="F3F6F8")
+    category_end = category_header_row + max(len(category_summary), 1)
+    if not category_summary.empty:
+        add_table(
+            category_ws,
+            category_header_row,
+            category_end,
+            len(category_summary.columns),
+            "DashboardCategories",
+        )
+        category_chart = BarChart()
+        category_chart.type = "col"
+        category_chart.style = 10
+        category_chart.grouping = "stacked"
+        category_chart.overlap = 100
+        category_chart.title = "Montants HT non posés par type et par état"
+        category_chart.y_axis.title = "Montant HT"
+        category_chart.x_axis.title = "Type de dossier"
+        category_chart.height = 7.5
+        category_chart.width = 15
+        category_data = Reference(
+            category_ws,
+            min_col=7,
+            max_col=9,
+            min_row=category_header_row,
+            max_row=category_end,
+        )
+        category_labels = Reference(
+            category_ws,
+            min_col=1,
+            min_row=category_header_row + 1,
+            max_row=category_end,
+        )
+        category_chart.add_data(category_data, titles_from_data=True)
+        category_chart.set_categories(category_labels)
+        category_ws.add_chart(category_chart, "K5")
+    for column_index in range(10, 21):
+        category_ws.column_dimensions[get_column_letter(column_index)].width = 11
+    category_ws.print_area = f"A1:T{max(category_end + 2, 20)}"
+    category_ws.sheet_properties.pageSetUpPr.fitToPage = True
+    category_ws.page_setup.orientation = category_ws.ORIENTATION_LANDSCAPE
+    category_ws.page_setup.paperSize = category_ws.PAPERSIZE_A4
+    category_ws.page_setup.fitToWidth = 1
+    category_ws.page_setup.fitToHeight = 1
+    category_ws.page_margins = PageMargins(
+        left=0.2, right=0.2, top=0.35, bottom=0.35, header=0.1, footer=0.15
+    )
+    category_ws.oddFooter.center.text = "Statistiques catégories EcoHabitat - Page &P / &N"
+
     all_ws = wb.create_sheet("Toutes les commandes")
     populate_detail_sheet(all_ws, detail, "TOUTES LES COMMANDES NON POSÉES", "OrdersAll")
 
@@ -6559,6 +6684,133 @@ def afficher_prevision_chantiers(tab):
         forecast, matches, unmatched_invoices = build_chantier_forecast(
             orders, invoices, delivery_months=delivery_months
         )
+        category_assignments = settings_chantiers.get("chantier_product_categories", {})
+        if not isinstance(category_assignments, dict):
+            category_assignments = {}
+        category_assignments = {
+            clean_visible(order_key): clean_visible(category)
+            for order_key, category in category_assignments.items()
+            if clean_visible(order_key) and clean_visible(category) in CHANTIER_PRODUCT_CATEGORIES
+        }
+        forecast["product_category"] = (
+            forecast["order_key"].map(category_assignments).fillna(CHANTIER_UNCLASSIFIED)
+        )
+
+        category_flash = st.session_state.pop("chantier_category_flash", "")
+        if category_flash:
+            st.success(category_flash)
+        with st.expander("🏷️ Catégoriser les dossiers", expanded=False):
+            classified_count = int(
+                forecast["product_category"].isin(CHANTIER_PRODUCT_CATEGORIES).sum()
+            )
+            st.caption(
+                f"{classified_count} dossier(s) classé(s) sur {len(forecast)}. "
+                "La catégorie est enregistrée durablement et utilisée dans les statistiques et les exports."
+            )
+            category_controls = st.columns([1, 2])
+            category_view = category_controls[0].selectbox(
+                "Afficher",
+                ["Non classés", "Tous les dossiers", *CHANTIER_PRODUCT_CATEGORIES],
+                key="chantier_category_view",
+            )
+            category_query = category_controls[1].text_input(
+                "Rechercher un client, une commande ou un commercial",
+                key="chantier_category_query",
+            ).strip()
+
+            category_source = forecast.copy()
+            if category_view == "Non classés":
+                category_source = category_source[
+                    category_source["product_category"] == CHANTIER_UNCLASSIFIED
+                ]
+            elif category_view in CHANTIER_PRODUCT_CATEGORIES:
+                category_source = category_source[
+                    category_source["product_category"] == category_view
+                ]
+            if category_query:
+                query_key = strip_accents(normalize_key(category_query))
+                search_values = category_source.apply(
+                    lambda row: strip_accents(normalize_key(
+                        f"{row.get('client_ref', '')} {row.get('order_no', '')} "
+                        f"{row.get('sellers', '')} {row.get('agency', '')}"
+                    )),
+                    axis=1,
+                )
+                category_source = category_source[
+                    search_values.str.contains(query_key, regex=False)
+                ]
+            category_source = category_source.sort_values(
+                ["sale_date", "client_ref"], ascending=[False, True], na_position="last"
+            )
+            visible_category_rows = category_source.head(150)
+            st.caption(
+                f"{len(category_source)} dossier(s) trouvé(s). "
+                "Les 150 plus récents sont affichés au maximum."
+            )
+
+            if visible_category_rows.empty:
+                st.info("Aucun dossier ne correspond à cette recherche.")
+            else:
+                category_editor = visible_category_rows[[
+                    "order_key", "product_category", "client_ref", "order_no",
+                    "source_period", "agency", "sellers", "status",
+                ]].copy().set_index("order_key")
+                category_editor = category_editor.rename(columns={
+                    "product_category": "Type de dossier",
+                    "client_ref": "Client / Référence affaire",
+                    "order_no": "N° commande",
+                    "source_period": "Période commerciale",
+                    "agency": "Agence",
+                    "sellers": "Commercial(aux)",
+                    "status": "État",
+                })
+                editor_state_key = safe_filename(
+                    f"{category_view}_{category_query or 'sans_recherche'}"
+                )[:80]
+                edited_categories = st.data_editor(
+                    category_editor,
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=[
+                        "Client / Référence affaire", "N° commande", "Période commerciale",
+                        "Agence", "Commercial(aux)", "État",
+                    ],
+                    column_config={
+                        "Type de dossier": st.column_config.SelectboxColumn(
+                            "Type de dossier",
+                            options=[CHANTIER_UNCLASSIFIED, *CHANTIER_PRODUCT_CATEGORIES],
+                            required=True,
+                        ),
+                    },
+                    key=f"chantier_category_editor_{editor_state_key}",
+                )
+                if st.button(
+                    "💾 Enregistrer les catégories affichées",
+                    type="primary",
+                    key=f"save_chantier_categories_{editor_state_key}",
+                ):
+                    latest_settings = load_settings()
+                    saved_categories = latest_settings.get("chantier_product_categories", {})
+                    if not isinstance(saved_categories, dict):
+                        saved_categories = {}
+                    changes = 0
+                    for order_key, edited_row in edited_categories.iterrows():
+                        selected_category = clean_visible(edited_row.get("Type de dossier", ""))
+                        previous_category = clean_visible(saved_categories.get(order_key, ""))
+                        if selected_category in CHANTIER_PRODUCT_CATEGORIES:
+                            if previous_category != selected_category:
+                                saved_categories[order_key] = selected_category
+                                changes += 1
+                        elif order_key in saved_categories:
+                            saved_categories.pop(order_key, None)
+                            changes += 1
+                    latest_settings["chantier_product_categories"] = saved_categories
+                    save_settings(latest_settings)
+                    st.session_state["chantier_category_flash"] = (
+                        f"{changes} catégorie(s) mise(s) à jour."
+                    )
+                    st.rerun()
+
         remaining = forecast[~forecast["is_installed"]].copy()
         total_remaining = float(remaining["amount_ht"].sum()) if not remaining.empty else 0.0
         status_summary = (
@@ -6608,8 +6860,8 @@ def afficher_prevision_chantiers(tab):
             on_click="ignore",
         )
         st.caption(
-            "Le fichier contient une synthèse par mois et par état, une liste complète, "
-            "puis une feuille détaillée pour chaque mois commercial."
+            "Le fichier contient une synthèse par mois et par état, les types de dossier, "
+            "une liste complète, puis une feuille détaillée pour chaque mois commercial."
         )
 
         matched_invoice_numbers = set(matches["invoice_no"]) if not matches.empty else set()
@@ -6693,6 +6945,77 @@ def afficher_prevision_chantiers(tab):
             "Les commandes sans facture se répartissent entre « Attente livraison » et « Pose possible ». "
             "« Dont facturation N-1 » est inclus dans la facturation totale. Celle-ci ne se soustrait donc pas "
             "directement aux commandes de 2026."
+        )
+
+        category_stats = (
+            forecast.groupby("product_category", as_index=False)
+            .agg(
+                **{
+                    "Dossiers": ("order_key", "size"),
+                    "CA total HT": ("amount_ht", "sum"),
+                    "Dossiers posés": ("is_installed", "sum"),
+                    "CA posé HT": ("amount_ht", lambda values: float(
+                        values[forecast.loc[values.index, "is_installed"]].sum()
+                    )),
+                }
+            )
+            .rename(columns={"product_category": "Type de dossier"})
+        )
+        category_stats["Dossiers non posés"] = (
+            category_stats["Dossiers"] - category_stats["Dossiers posés"]
+        )
+        category_stats["CA non posé HT"] = (
+            category_stats["CA total HT"] - category_stats["CA posé HT"]
+        )
+        category_stats["Ratio posé %"] = np.where(
+            category_stats["CA total HT"] > 0,
+            category_stats["CA posé HT"] / category_stats["CA total HT"] * 100,
+            0.0,
+        )
+        category_order = [*CHANTIER_PRODUCT_CATEGORIES, CHANTIER_UNCLASSIFIED]
+        category_stats["_tri"] = category_stats["Type de dossier"].map(
+            {category: index for index, category in enumerate(category_order)}
+        ).fillna(len(category_order))
+        category_stats = category_stats.sort_values("_tri").drop(columns="_tri")
+        category_chart_data = category_stats.melt(
+            id_vars="Type de dossier",
+            value_vars=["CA posé HT", "CA non posé HT"],
+            var_name="Situation",
+            value_name="Montant HT",
+        )
+        category_chart = alt.Chart(category_chart_data).mark_bar().encode(
+            x=alt.X("Montant HT:Q", title="Montant HT", axis=alt.Axis(format="~s")),
+            y=alt.Y("Type de dossier:N", sort=category_order, title=None),
+            color=alt.Color(
+                "Situation:N",
+                scale=alt.Scale(
+                    domain=["CA posé HT", "CA non posé HT"],
+                    range=["#5EAF2C", "#D9A21B"],
+                ),
+                title=None,
+            ),
+            tooltip=[
+                alt.Tooltip("Type de dossier:N"),
+                alt.Tooltip("Situation:N"),
+                alt.Tooltip("Montant HT:Q", format=",.2f"),
+            ],
+        )
+        st.markdown("#### Statistiques par type de dossier")
+        st.altair_chart(category_chart.properties(height=230), use_container_width=True)
+        st.dataframe(
+            category_stats,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "CA total HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA posé HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA non posé HT": st.column_config.NumberColumn(format="%.2f €"),
+                "Ratio posé %": st.column_config.NumberColumn(format="%.1f %%"),
+            },
+        )
+        st.caption(
+            "Les dossiers non classés restent isolés afin de ne pas fausser les statistiques MEN "
+            "et Produit extérieur."
         )
 
         monthly_install_ratio = (
@@ -6787,10 +7110,11 @@ def afficher_prevision_chantiers(tab):
             if selected_period_rows:
                 selected_period = period_control.iloc[selected_period_rows[0]]["Période commerciale"]
                 period_detail = remaining[remaining["source_period"] == selected_period][[
-                    "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
+                    "product_category", "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
                     "agency", "sellers", "amount_ht",
                 ]].copy()
                 period_detail = period_detail.rename(columns={
+                    "product_category": "Type de dossier",
                     "status": "État",
                     "client_ref": "Client / Référence affaire",
                     "order_no": "N° commande",
@@ -6845,7 +7169,7 @@ def afficher_prevision_chantiers(tab):
                     on_click="ignore",
                 )
 
-        filter_cols = st.columns([1, 1, 1.5])
+        filter_cols = st.columns([1, 1, 1.2, 1.5])
         agencies = sorted(value for value in remaining["agency"].dropna().unique() if clean_visible(value))
         status_order = [
             "Attente livraison", "Pose possible", "Date à contrôler"
@@ -6857,18 +7181,33 @@ def afficher_prevision_chantiers(tab):
         selected_statuses = filter_cols[1].multiselect(
             "États", statuses, default=statuses, key="chantier_filter_statuses"
         )
-        chantier_query = filter_cols[2].text_input(
+        available_categories = [
+            category for category in [*CHANTIER_PRODUCT_CATEGORIES, CHANTIER_UNCLASSIFIED]
+            if category in set(remaining["product_category"])
+        ]
+        selected_categories = filter_cols[2].multiselect(
+            "Types de dossier",
+            available_categories,
+            default=available_categories,
+            key="chantier_filter_categories",
+        )
+        chantier_query = filter_cols[3].text_input(
             "Rechercher un client, document ou vendeur", key="chantier_filter_query"
         ).strip()
 
         filtered = remaining.copy()
         filtered = filtered[filtered["agency"].isin(selected_agencies)] if selected_agencies else filtered.iloc[0:0]
         filtered = filtered[filtered["status"].isin(selected_statuses)] if selected_statuses else filtered.iloc[0:0]
+        filtered = (
+            filtered[filtered["product_category"].isin(selected_categories)]
+            if selected_categories else filtered.iloc[0:0]
+        )
         if chantier_query:
             search_key = strip_accents(normalize_key(chantier_query))
             search_values = filtered.apply(
                 lambda row: strip_accents(normalize_key(
-                    f"{row.get('client_ref', '')} {row.get('order_no', '')} {row.get('sellers', '')}"
+                    f"{row.get('client_ref', '')} {row.get('order_no', '')} "
+                    f"{row.get('sellers', '')} {row.get('product_category', '')}"
                 )), axis=1,
             )
             filtered = filtered[search_values.str.contains(search_key, regex=False)]
@@ -6886,10 +7225,11 @@ def afficher_prevision_chantiers(tab):
 
         st.markdown("#### Détail des chantiers restant à poser")
         detail = filtered[[
-            "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
+            "product_category", "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
             "agency", "sellers", "amount_ht", "source_period",
         ]].copy()
         detail = detail.rename(columns={
+            "product_category": "Type de dossier",
             "status": "État", "client_ref": "Client / Référence affaire", "order_no": "N° commande",
             "sale_date": "Date vente", "earliest_install_date": "Pose possible à partir du",
             "agency": "Agence", "sellers": "Commercial(aux)", "amount_ht": "Montant HT",
