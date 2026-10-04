@@ -22,7 +22,11 @@ import copy
 from datetime import datetime
 from urllib.parse import quote, urlencode
 from openpyxl import Workbook, load_workbook
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from chantier_forecast import (
     build_chantier_forecast,
     build_orders_from_periods,
@@ -6180,17 +6184,43 @@ def create_chantier_remaining_workbook(remaining):
         ["_tri", "État", "Date document", "Agence"], na_position="last"
     ).drop(columns="_tri")
 
-    summary = (
-        detail.groupby(["Période commerciale", "État"], as_index=False)
-        .agg(**{"Nombre de commandes": ("N° commande", "size"), "Montant HT": ("Montant HT", "sum")})
+    status_order = ["Attente livraison", "Pose possible", "Date à contrôler"]
+    summary_rows = []
+    period_names = sorted(
+        detail["Période commerciale"].dropna().unique(), key=evp_period_sort_key
     )
-    summary["_tri"] = summary["Période commerciale"].map(evp_period_sort_key)
-    summary = summary.sort_values(["_tri", "État"]).drop(columns="_tri")
+    for period_name in period_names:
+        period_rows = detail[detail["Période commerciale"] == period_name]
+        summary_row = {
+            "Période commerciale": period_name,
+            "Total dossiers": int(len(period_rows)),
+            "Montant total HT": float(period_rows["Montant HT"].sum()),
+        }
+        for status in status_order:
+            status_rows = period_rows[period_rows["État"] == status]
+            if status == "Attente livraison":
+                label = "attente"
+            elif status == "Pose possible":
+                label = "pose possible"
+            else:
+                label = "à contrôler"
+            summary_row[f"Nb {label}"] = int(len(status_rows))
+            summary_row[f"Montant {label}"] = float(status_rows["Montant HT"].sum())
+        summary_rows.append(summary_row)
+    summary = pd.DataFrame(summary_rows, columns=[
+        "Période commerciale", "Total dossiers", "Montant total HT",
+        "Nb attente", "Nb pose possible", "Nb à contrôler",
+        "Montant attente", "Montant pose possible", "Montant à contrôler",
+    ])
 
     wb = Workbook()
-    header_fill = PatternFill("solid", fgColor="156D86")
-    header_font = Font(color="FFFFFF", bold=True)
-    total_fill = PatternFill("solid", fgColor="DDEBF7")
+    navy = "17324D"
+    teal = "156D86"
+    light_blue = "DDEBF7"
+    pale_green = "E2F0D9"
+    pale_yellow = "FFF2CC"
+    pale_red = "FCE4D6"
+    white = "FFFFFF"
     border = Border(
         left=Side(style="thin", color="D9E1E8"),
         right=Side(style="thin", color="D9E1E8"),
@@ -6207,76 +6237,231 @@ def create_chantier_remaining_workbook(remaining):
             return value.item()
         return value
 
-    def populate_sheet(ws, frame, currency_columns=None, date_columns=None):
-        currency_columns = set(currency_columns or [])
-        date_columns = set(date_columns or [])
-        ws.append(list(frame.columns))
-        for row in frame.itertuples(index=False, name=None):
-            ws.append([excel_value(value) for value in row])
+    def configure_print(ws, header_rows, last_column, last_row, fit_height=0):
+        ws.sheet_view.showGridLines = False
+        ws.freeze_panes = f"A{header_rows + 1}"
+        ws.print_title_rows = f"1:{header_rows}"
+        ws.print_area = f"A1:{get_column_letter(last_column)}{last_row}"
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = fit_height
+        ws.page_margins = PageMargins(
+            left=0.2, right=0.2, top=0.45, bottom=0.45, header=0.15, footer=0.2
+        )
+        ws.print_options.horizontalCentered = True
+        ws.oddFooter.center.text = "Page &P / &N"
+        ws.oddFooter.right.text = "EcoHabitat"
 
-        for cell in ws[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = border
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                cell.border = border
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    def add_table(ws, start_row, end_row, end_column, table_name):
+        if end_row < start_row:
+            return
+        table = Table(
+            displayName=table_name,
+            ref=f"A{start_row}:{get_column_letter(end_column)}{end_row}",
+        )
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        ws.add_table(table)
 
-        for column_index, column_name in enumerate(frame.columns, start=1):
-            if column_name in currency_columns:
-                for row_index in range(2, ws.max_row + 1):
-                    ws.cell(row_index, column_index).number_format = '#,##0.00 [$€-fr-FR]'
-            if column_name in date_columns:
-                for row_index in range(2, ws.max_row + 1):
-                    ws.cell(row_index, column_index).number_format = "dd/mm/yyyy"
-
-            max_length = len(str(column_name))
-            for cell in ws.iter_cols(
-                min_col=column_index, max_col=column_index, min_row=2, max_row=ws.max_row
-            ):
-                for item in cell:
-                    max_length = max(max_length, len(str(item.value)) if item.value is not None else 0)
-            ws.column_dimensions[ws.cell(1, column_index).column_letter].width = min(
-                max(max_length + 2, 12), 42
-            )
-
-        ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
+    def populate_detail_sheet(ws, frame, title, table_name):
+        max_column = len(frame.columns)
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_column)
+        title_cell = ws.cell(1, 1, title)
+        title_cell.fill = PatternFill("solid", fgColor=navy)
+        title_cell.font = Font(color=white, bold=True, size=16)
+        title_cell.alignment = Alignment(horizontal="left", vertical="center")
         ws.row_dimensions[1].height = 30
 
-    summary_ws = wb.active
-    summary_ws.title = "Synthèse"
-    populate_sheet(summary_ws, summary, currency_columns={"Montant HT"})
-    total_row = summary_ws.max_row + 2
-    summary_ws.cell(total_row, 1, "TOTAL")
-    summary_ws.cell(total_row, 3, int(len(detail)))
-    summary_ws.cell(total_row, 4, float(detail["Montant HT"].sum()))
-    for cell in summary_ws[total_row]:
-        cell.fill = total_fill
-        cell.font = Font(bold=True)
+        ws.cell(2, 1, "Nombre de commandes")
+        ws.cell(2, 2, int(len(frame)))
+        ws.cell(2, 3, "Montant total HT")
+        ws.cell(2, 4, float(frame["Montant HT"].sum()))
+        ws.cell(2, 5, "Généré le")
+        ws.cell(2, 6, datetime.now().strftime("%d/%m/%Y %H:%M"))
+        for cell in ws[2]:
+            cell.fill = PatternFill("solid", fgColor=light_blue)
+            cell.font = Font(bold=cell.column in {1, 3, 5})
+            cell.border = border
+        ws.cell(2, 4).number_format = '#,##0.00 [$€-fr-FR]'
+        ws.row_dimensions[2].height = 22
+
+        header_row = 4
+        for column_index, column_name in enumerate(frame.columns, start=1):
+            cell = ws.cell(header_row, column_index, column_name)
+            cell.fill = PatternFill("solid", fgColor=teal)
+            cell.font = Font(color=white, bold=True)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[header_row].height = 34
+
+        for row_index, row in enumerate(frame.itertuples(index=False, name=None), start=5):
+            for column_index, value in enumerate(row, start=1):
+                cell = ws.cell(row_index, column_index, excel_value(value))
+                cell.border = border
+                cell.alignment = Alignment(vertical="top", wrap_text=column_index in {3, 8})
+            ws.row_dimensions[row_index].height = 24
+
+        column_widths = {
+            "Période commerciale": 18,
+            "État": 19,
+            "Client / Référence affaire": 40,
+            "N° commande": 19,
+            "Date document": 14,
+            "Pose possible à partir du": 17,
+            "Agence": 17,
+            "Commercial(aux)": 29,
+            "Montant HT": 16,
+        }
+        for column_index, column_name in enumerate(frame.columns, start=1):
+            ws.column_dimensions[get_column_letter(column_index)].width = column_widths.get(column_name, 16)
+            if column_name == "Montant HT":
+                for row_index in range(5, ws.max_row + 1):
+                    ws.cell(row_index, column_index).number_format = '#,##0.00 [$€-fr-FR]'
+            if column_name in {"Date document", "Pose possible à partir du"}:
+                for row_index in range(5, ws.max_row + 1):
+                    ws.cell(row_index, column_index).number_format = "dd/mm/yyyy"
+
+        if "État" in frame.columns:
+            status_column = frame.columns.get_loc("État") + 1
+            status_fills = {
+                "Attente livraison": pale_yellow,
+                "Pose possible": pale_green,
+                "Date à contrôler": pale_red,
+            }
+            for row_index in range(5, ws.max_row + 1):
+                status_cell = ws.cell(row_index, status_column)
+                fill_color = status_fills.get(str(status_cell.value), light_blue)
+                status_cell.fill = PatternFill("solid", fgColor=fill_color)
+                status_cell.font = Font(bold=True, color=navy)
+
+        add_table(ws, header_row, ws.max_row, max_column, table_name)
+        configure_print(ws, header_row, max_column, ws.max_row)
+
+    dashboard = wb.active
+    dashboard.title = "Tableau de bord"
+    dashboard.sheet_view.showGridLines = False
+    dashboard.merge_cells("A1:T2")
+    dashboard["A1"] = "COMMANDES NON POSÉES - TABLEAU DE BORD"
+    dashboard["A1"].fill = PatternFill("solid", fgColor=navy)
+    dashboard["A1"].font = Font(color=white, bold=True, size=20)
+    dashboard["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    dashboard.row_dimensions[1].height = 28
+    dashboard.row_dimensions[2].height = 18
+    dashboard.merge_cells("A3:T3")
+    dashboard["A3"] = (
+        "Commandes confirmées sans facture, ventilées par mois commercial et par état "
+        f"- généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
+    )
+    dashboard["A3"].font = Font(color="5B6573", italic=True, size=10)
+    dashboard["A3"].alignment = Alignment(horizontal="center")
+
+    kpis = [
+        ("A5:C5", "A6:C7", "COMMANDES NON POSÉES", int(len(detail)), "0", light_blue),
+        ("D5:F5", "D6:F7", "MONTANT TOTAL HT", float(detail["Montant HT"].sum()), '#,##0 [$€-fr-FR]', light_blue),
+        ("G5:I5", "G6:I7", "ATTENTE LIVRAISON", int((detail["État"] == "Attente livraison").sum()), "0", pale_yellow),
+        ("J5:L5", "J6:L7", "POSE POSSIBLE", int((detail["État"] == "Pose possible").sum()), "0", pale_green),
+    ]
+    for label_range, value_range, label, value, number_format, fill_color in kpis:
+        dashboard.merge_cells(label_range)
+        dashboard.merge_cells(value_range)
+        label_cell = dashboard[label_range.split(":")[0]]
+        value_cell = dashboard[value_range.split(":")[0]]
+        label_cell.value = label
+        value_cell.value = value
+        label_cell.fill = PatternFill("solid", fgColor=teal)
+        label_cell.font = Font(color=white, bold=True, size=10)
+        label_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.fill = PatternFill("solid", fgColor=fill_color)
+        value_cell.font = Font(color=navy, bold=True, size=18)
+        value_cell.alignment = Alignment(horizontal="center", vertical="center")
+        value_cell.number_format = number_format
+
+    summary_start = 10
+    for column_index, column_name in enumerate(summary.columns, start=1):
+        cell = dashboard.cell(summary_start, column_index, column_name)
+        cell.fill = PatternFill("solid", fgColor=teal)
+        cell.font = Font(color=white, bold=True, size=9)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = border
-    summary_ws.cell(total_row, 4).number_format = '#,##0.00 [$€-fr-FR]'
+    dashboard.row_dimensions[summary_start].height = 38
+    for row_index, row in enumerate(summary.itertuples(index=False, name=None), start=summary_start + 1):
+        for column_index, value in enumerate(row, start=1):
+            cell = dashboard.cell(row_index, column_index, excel_value(value))
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            if column_index in {3, 7, 8, 9}:
+                cell.number_format = '#,##0 [$€-fr-FR]'
+        if row_index % 2 == 0:
+            for cell in dashboard[row_index][:len(summary.columns)]:
+                cell.fill = PatternFill("solid", fgColor="F3F6F8")
+    for column_index in range(1, len(summary.columns) + 1):
+        dashboard.column_dimensions[get_column_letter(column_index)].width = 16
+    dashboard.column_dimensions["A"].width = 19
+
+    summary_end = summary_start + max(len(summary), 1)
+    if not summary.empty:
+        add_table(dashboard, summary_start, summary_end, len(summary.columns), "DashboardMonthly")
+        chart = BarChart()
+        chart.type = "col"
+        chart.style = 10
+        chart.grouping = "stacked"
+        chart.overlap = 100
+        chart.title = "Montants HT non posés par mois et par état"
+        chart.y_axis.title = "Montant HT"
+        chart.x_axis.title = "Période commerciale"
+        chart.height = 7.5
+        chart.width = 15
+        data = Reference(
+            dashboard,
+            min_col=7,
+            max_col=9,
+            min_row=summary_start,
+            max_row=summary_end,
+        )
+        categories = Reference(
+            dashboard,
+            min_col=1,
+            min_row=summary_start + 1,
+            max_row=summary_end,
+        )
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(categories)
+        dashboard.add_chart(chart, "K10")
+
+    for column_index in range(10, 21):
+        dashboard.column_dimensions[get_column_letter(column_index)].width = 11
+    dashboard.freeze_panes = "A11"
+    dashboard.print_area = f"A1:T{max(summary_end + 2, 24)}"
+    dashboard.sheet_properties.pageSetUpPr.fitToPage = True
+    dashboard.page_setup.orientation = dashboard.ORIENTATION_LANDSCAPE
+    dashboard.page_setup.paperSize = dashboard.PAPERSIZE_A4
+    dashboard.page_setup.fitToWidth = 1
+    dashboard.page_setup.fitToHeight = 1
+    dashboard.page_margins = PageMargins(
+        left=0.2, right=0.2, top=0.35, bottom=0.35, header=0.1, footer=0.15
+    )
+    dashboard.oddFooter.center.text = "Tableau de bord EcoHabitat - Page &P / &N"
 
     all_ws = wb.create_sheet("Toutes les commandes")
-    populate_sheet(
-        all_ws,
-        detail,
-        currency_columns={"Montant HT"},
-        date_columns={"Date document", "Pose possible à partir du"},
-    )
+    populate_detail_sheet(all_ws, detail, "TOUTES LES COMMANDES NON POSÉES", "OrdersAll")
 
-    for period_name in detail["Période commerciale"].drop_duplicates():
+    for period_index, period_name in enumerate(period_names, start=1):
         period_detail = detail[detail["Période commerciale"] == period_name].copy()
         period_detail = period_detail.drop(columns="Période commerciale")
         sheet_name = safe_filename(period_name)[:31] or "Mois"
         period_ws = wb.create_sheet(sheet_name)
-        populate_sheet(
+        populate_detail_sheet(
             period_ws,
             period_detail,
-            currency_columns={"Montant HT"},
-            date_columns={"Date document", "Pose possible à partir du"},
+            f"COMMANDES NON POSÉES - {period_name.upper()}",
+            f"OrdersMonth{period_index}",
         )
 
     output = io.BytesIO()
