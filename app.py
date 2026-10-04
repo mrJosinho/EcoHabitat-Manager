@@ -6169,16 +6169,64 @@ CHANTIER_PRODUCT_CATEGORIES = [
 ]
 CHANTIER_UNCLASSIFIED = "NON CLASSE"
 
+CHANTIER_MEN_KEYWORDS = [
+    "MENUISERIE", "MENUISERIES", "FENETRE", "FENETRES", "PORTE", "PORTES",
+    "VOLET", "VOLETS", "PORTAIL", "PORTAILS", "PORTILLON", "PORTILLONS",
+    "PORTE DE GARAGE", "PORTES DE GARAGE", "GARAGE", "COULISSANT", "COULISSANTS",
+    "BAIE", "BAIES", "VELUX", "BARDAGE", "CACHE MOINEAU", "CACHE MOINEAUX",
+    "CLOTURE", "CLOTURES", "PERGOLA", "PERGOLAS", "STORE", "STORES",
+    "FERMETURE", "FERMETURES", "MOTORISATION", "TELECOMMANDE",
+]
+CHANTIER_EXTERIOR_KEYWORDS = [
+    "ITE", "ISOLATION EXTERIEURE", "ISOLATION THERMIQUE", "ISOLATION DES MURS",
+    "RAVALEMENT", "ENDUIT", "ENDUITS", "RESINE", "ENROBE", "HYDROFUGE",
+    "FACADE", "FACADES", "DALLE", "DALLES", "BETON", "NIDAGRAVEL",
+    "TOITURE", "TOITURES", "SOIN DE TOITURE", "NETTOYAGE DE FACADE",
+    "PAC", "POMPE A CHALEUR", "CHAUFFAGE", "RADIATEUR", "RADIATEURS",
+]
+
+
+def infer_chantier_product_category(reference):
+    normalized = strip_accents(normalize_key(reference))
+    normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
+    padded = f" {' '.join(normalized.split())} "
+
+    def detected(keywords):
+        return sorted({
+            keyword for keyword in keywords
+            if f" {keyword} " in padded
+        })
+
+    men_hits = detected(CHANTIER_MEN_KEYWORDS)
+    exterior_hits = detected(CHANTIER_EXTERIOR_KEYWORDS)
+    if men_hits and exterior_hits:
+        category = "CUMULE MEN + PRODUIT EXTERIEUR"
+        confidence = "ÉLEVÉE"
+    elif men_hits:
+        category = "MEN"
+        confidence = "ÉLEVÉE" if len(men_hits) >= 2 else "MOYENNE"
+    elif exterior_hits:
+        category = "PRODUIT EXTERIEUR"
+        confidence = "ÉLEVÉE" if len(exterior_hits) >= 2 else "MOYENNE"
+    else:
+        category = CHANTIER_UNCLASSIFIED
+        confidence = "À CONTRÔLER"
+
+    return category, confidence, " / ".join([*men_hits, *exterior_hits])
+
 
 def create_chantier_remaining_workbook(remaining):
     detail_columns = [
-        "source_period", "product_category", "status", "client_ref", "order_no", "sale_date",
-        "earliest_install_date", "agency", "sellers", "amount_ht",
+        "client_ref", "order_no", "product_category", "status", "amount_ht", "sale_date",
+        "earliest_install_date", "agency", "sellers", "source_period", "classification_source",
+        "classification_confidence",
     ]
     detail = remaining[detail_columns].copy()
     detail = detail.rename(columns={
         "source_period": "Période commerciale",
         "product_category": "Type de dossier",
+        "classification_source": "Origine du classement",
+        "classification_confidence": "Confiance automatique",
         "status": "État",
         "client_ref": "Client / Référence affaire",
         "order_no": "N° commande",
@@ -6324,6 +6372,8 @@ def create_chantier_remaining_workbook(remaining):
         column_widths = {
             "Période commerciale": 18,
             "Type de dossier": 31,
+            "Origine du classement": 21,
+            "Confiance automatique": 20,
             "État": 19,
             "Client / Référence affaire": 40,
             "N° commande": 19,
@@ -6686,16 +6736,29 @@ def afficher_prevision_chantiers(tab):
         forecast, matches, unmatched_invoices = build_chantier_forecast(
             orders, invoices, delivery_months=delivery_months
         )
+        inferred_categories = forecast["client_ref"].apply(infer_chantier_product_category)
+        forecast["suggested_category"] = inferred_categories.map(lambda result: result[0])
+        forecast["classification_confidence"] = inferred_categories.map(lambda result: result[1])
+        forecast["classification_rule"] = inferred_categories.map(lambda result: result[2])
         category_assignments = settings_chantiers.get("chantier_product_categories", {})
         if not isinstance(category_assignments, dict):
             category_assignments = {}
         category_assignments = {
             clean_visible(order_key): clean_visible(category)
             for order_key, category in category_assignments.items()
-            if clean_visible(order_key) and clean_visible(category) in CHANTIER_PRODUCT_CATEGORIES
+            if clean_visible(order_key)
+            and clean_visible(category) in [*CHANTIER_PRODUCT_CATEGORIES, CHANTIER_UNCLASSIFIED]
         }
-        forecast["product_category"] = (
-            forecast["order_key"].map(category_assignments).fillna(CHANTIER_UNCLASSIFIED)
+        manual_categories = forecast["order_key"].map(category_assignments)
+        forecast["product_category"] = manual_categories.fillna(forecast["suggested_category"])
+        forecast["classification_source"] = np.where(
+            manual_categories.notna(),
+            "Correction manuelle",
+            np.where(
+                forecast["suggested_category"] == CHANTIER_UNCLASSIFIED,
+                "À contrôler",
+                "Référence affaire",
+            ),
         )
 
         category_flash = st.session_state.pop("chantier_category_flash", "")
@@ -6705,9 +6768,12 @@ def afficher_prevision_chantiers(tab):
             classified_count = int(
                 forecast["product_category"].isin(CHANTIER_PRODUCT_CATEGORIES).sum()
             )
+            manual_count = int((forecast["classification_source"] == "Correction manuelle").sum())
+            automatic_count = int((forecast["classification_source"] == "Référence affaire").sum())
             st.caption(
                 f"{classified_count} dossier(s) classé(s) sur {len(forecast)}. "
-                "La catégorie est enregistrée durablement et utilisée dans les statistiques et les exports."
+                f"{automatic_count} automatiquement depuis la référence affaire et "
+                f"{manual_count} corrigé(s) manuellement. Les corrections restent prioritaires."
             )
             category_controls = st.columns([1, 2])
             category_view = category_controls[0].selectbox(
@@ -6754,11 +6820,16 @@ def afficher_prevision_chantiers(tab):
                 st.info("Aucun dossier ne correspond à cette recherche.")
             else:
                 category_editor = visible_category_rows[[
-                    "order_key", "product_category", "client_ref", "order_no",
-                    "source_period", "agency", "sellers", "status",
+                    "order_key", "client_ref", "order_no", "product_category", "suggested_category",
+                    "classification_confidence", "classification_rule", "classification_source",
+                    "status", "source_period", "agency", "sellers",
                 ]].copy().set_index("order_key")
                 category_editor = category_editor.rename(columns={
                     "product_category": "Type de dossier",
+                    "suggested_category": "Catégorie suggérée",
+                    "classification_confidence": "Confiance",
+                    "classification_rule": "Mot(s) détecté(s)",
+                    "classification_source": "Origine",
                     "client_ref": "Client / Référence affaire",
                     "order_no": "N° commande",
                     "source_period": "Période commerciale",
@@ -6774,6 +6845,7 @@ def afficher_prevision_chantiers(tab):
                     use_container_width=True,
                     hide_index=True,
                     disabled=[
+                        "Catégorie suggérée", "Confiance", "Mot(s) détecté(s)", "Origine",
                         "Client / Référence affaire", "N° commande", "Période commerciale",
                         "Agence", "Commercial(aux)", "État",
                     ],
@@ -6798,8 +6870,12 @@ def afficher_prevision_chantiers(tab):
                     changes = 0
                     for order_key, edited_row in edited_categories.iterrows():
                         selected_category = clean_visible(edited_row.get("Type de dossier", ""))
+                        suggested_category = clean_visible(
+                            edited_row.get("Catégorie suggérée", CHANTIER_UNCLASSIFIED)
+                        )
                         previous_category = clean_visible(saved_categories.get(order_key, ""))
-                        if selected_category in CHANTIER_PRODUCT_CATEGORIES:
+                        valid_categories = [*CHANTIER_PRODUCT_CATEGORIES, CHANTIER_UNCLASSIFIED]
+                        if selected_category in valid_categories and selected_category != suggested_category:
                             if previous_category != selected_category:
                                 saved_categories[order_key] = selected_category
                                 changes += 1
@@ -6959,6 +7035,24 @@ def afficher_prevision_chantiers(tab):
                     "CA posé HT": ("amount_ht", lambda values: float(
                         values[forecast.loc[values.index, "is_installed"]].sum()
                     )),
+                    "Dossiers attente livraison": (
+                        "status", lambda values: int((values == "Attente livraison").sum())
+                    ),
+                    "CA attente livraison HT": ("amount_ht", lambda values: float(
+                        values[forecast.loc[values.index, "status"] == "Attente livraison"].sum()
+                    )),
+                    "Dossiers pose possible": (
+                        "status", lambda values: int((values == "Pose possible").sum())
+                    ),
+                    "CA pose possible HT": ("amount_ht", lambda values: float(
+                        values[forecast.loc[values.index, "status"] == "Pose possible"].sum()
+                    )),
+                    "Dossiers à contrôler": (
+                        "status", lambda values: int((values == "Date à contrôler").sum())
+                    ),
+                    "CA à contrôler HT": ("amount_ht", lambda values: float(
+                        values[forecast.loc[values.index, "status"] == "Date à contrôler"].sum()
+                    )),
                 }
             )
             .rename(columns={"product_category": "Type de dossier"})
@@ -6966,7 +7060,7 @@ def afficher_prevision_chantiers(tab):
         category_stats["Dossiers non posés"] = (
             category_stats["Dossiers"] - category_stats["Dossiers posés"]
         )
-        category_stats["CA non posé HT"] = (
+        category_stats["CA commandes sans facture HT"] = (
             category_stats["CA total HT"] - category_stats["CA posé HT"]
         )
         category_stats["Ratio posé %"] = np.where(
@@ -6981,7 +7075,10 @@ def afficher_prevision_chantiers(tab):
         category_stats = category_stats.sort_values("_tri").drop(columns="_tri")
         category_chart_data = category_stats.melt(
             id_vars="Type de dossier",
-            value_vars=["CA posé HT", "CA non posé HT"],
+            value_vars=[
+                "CA posé HT", "CA attente livraison HT", "CA pose possible HT",
+                "CA à contrôler HT",
+            ],
             var_name="Situation",
             value_name="Montant HT",
         )
@@ -6991,8 +7088,11 @@ def afficher_prevision_chantiers(tab):
             color=alt.Color(
                 "Situation:N",
                 scale=alt.Scale(
-                    domain=["CA posé HT", "CA non posé HT"],
-                    range=["#5EAF2C", "#D9A21B"],
+                    domain=[
+                        "CA posé HT", "CA attente livraison HT", "CA pose possible HT",
+                        "CA à contrôler HT",
+                    ],
+                    range=["#5EAF2C", "#E9B949", "#2F80C9", "#D05A4E"],
                 ),
                 title=None,
             ),
@@ -7011,13 +7111,17 @@ def afficher_prevision_chantiers(tab):
             column_config={
                 "CA total HT": st.column_config.NumberColumn(format="%.2f €"),
                 "CA posé HT": st.column_config.NumberColumn(format="%.2f €"),
-                "CA non posé HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA attente livraison HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA pose possible HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA à contrôler HT": st.column_config.NumberColumn(format="%.2f €"),
+                "CA commandes sans facture HT": st.column_config.NumberColumn(format="%.2f €"),
                 "Ratio posé %": st.column_config.NumberColumn(format="%.1f %%"),
             },
         )
         st.caption(
-            "Les dossiers non classés restent isolés afin de ne pas fausser les statistiques MEN "
-            "et Produit extérieur."
+            "Le CA des commandes sans facture est détaillé entre attente livraison, pose possible "
+            "et date à contrôler. Les dossiers non classés restent isolés afin de ne pas fausser "
+            "les statistiques MEN et Produit extérieur."
         )
 
         monthly_install_ratio = (
@@ -7112,11 +7216,14 @@ def afficher_prevision_chantiers(tab):
             if selected_period_rows:
                 selected_period = period_control.iloc[selected_period_rows[0]]["Période commerciale"]
                 period_detail = remaining[remaining["source_period"] == selected_period][[
-                    "product_category", "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
-                    "agency", "sellers", "amount_ht",
+                    "client_ref", "order_no", "product_category", "status", "amount_ht", "sale_date",
+                    "earliest_install_date", "agency", "sellers", "classification_source",
+                    "classification_confidence",
                 ]].copy()
                 period_detail = period_detail.rename(columns={
                     "product_category": "Type de dossier",
+                    "classification_source": "Origine du classement",
+                    "classification_confidence": "Confiance automatique",
                     "status": "État",
                     "client_ref": "Client / Référence affaire",
                     "order_no": "N° commande",
@@ -7227,11 +7334,14 @@ def afficher_prevision_chantiers(tab):
 
         st.markdown("#### Détail des chantiers restant à poser")
         detail = filtered[[
-            "product_category", "status", "client_ref", "order_no", "sale_date", "earliest_install_date",
-            "agency", "sellers", "amount_ht", "source_period",
+            "client_ref", "order_no", "product_category", "status", "amount_ht", "sale_date",
+            "earliest_install_date", "agency", "sellers", "source_period", "classification_source",
+            "classification_confidence",
         ]].copy()
         detail = detail.rename(columns={
             "product_category": "Type de dossier",
+            "classification_source": "Origine du classement",
+            "classification_confidence": "Confiance automatique",
             "status": "État", "client_ref": "Client / Référence affaire", "order_no": "N° commande",
             "sale_date": "Date vente", "earliest_install_date": "Pose possible à partir du",
             "agency": "Agence", "sellers": "Commercial(aux)", "amount_ht": "Montant HT",
