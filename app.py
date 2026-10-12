@@ -1239,6 +1239,15 @@ def is_joseph_admin(user_data=None, username=None):
     )
 
 
+def can_access_prevision_chantiers(user_data=None, username=None):
+    user_data = user_data if isinstance(user_data, dict) else {}
+    if normalize_key(user_data.get("role")) != "ADMIN":
+        return False
+
+    user_name = strip_accents(normalize_key(user_data.get("nom")))
+    return is_joseph_admin(user_data, username) or user_name == "PETIT LILIAN"
+
+
 def user_photo_slug(user):
     user = user if isinstance(user, dict) else {}
     explicit_photo = clean_visible(user.get("photo", ""))
@@ -6648,8 +6657,8 @@ def create_chantier_remaining_workbook(remaining):
 
 def afficher_prevision_chantiers(tab):
     with tab:
-        if not is_joseph_admin(user):
-            st.error("Cette rubrique est réservée à Joseph Lucchini.")
+        if not can_access_prevision_chantiers(user):
+            st.error("Cette rubrique est réservée aux administrateurs autorisés.")
             return
 
         st.subheader("🏗️ Prévision des chantiers")
@@ -7603,7 +7612,7 @@ if st.session_state.get("df_vendeurs") is not None:
             "💼 EVP / Paie",
             "⚙️ Utilisateurs"
         ]
-        if is_joseph_admin(user):
+        if can_access_prevision_chantiers(user):
             pages.insert(7, "🏗️ Prévision chantiers")
         if st.session_state.get("active_page_admin") not in pages:
             st.session_state["active_page_admin"] = pages[0]
@@ -8378,7 +8387,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
         if active_page == "⏳ En attente":
             afficher_dossiers_en_attente(st.container())
-        if active_page == "🏗️ Prévision chantiers" and is_joseph_admin(user):
+        if active_page == "🏗️ Prévision chantiers" and can_access_prevision_chantiers(user):
             afficher_prevision_chantiers(st.container())
         if active_page == "💼 EVP / Paie":
             afficher_evp_paie(st.container(), df_vendeurs_all, df_directeurs)
