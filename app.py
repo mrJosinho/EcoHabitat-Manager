@@ -35,6 +35,7 @@ from chantier_forecast import (
     replace_facturation_years,
     save_facturation_store,
 )
+from chantier_google_sheet import google_sheet_config, sync_tracking_spreadsheet
 
 # ====================== CONFIG ======================
 
@@ -6928,6 +6929,51 @@ def afficher_prevision_chantiers(tab):
         st.caption(
             f"Date minimale de pose : date de vente + {delivery_months} mois."
         )
+
+        with st.expander("🔄 Mettre à jour le tableau partagé", expanded=False):
+            st.caption(
+                "Le bouton relit les notes du Google Sheet, retire les commandes désormais "
+                "facturées, archive ces dossiers et actualise la synthèse ainsi que les graphiques."
+            )
+            try:
+                sheet_secrets = st.secrets
+            except Exception:
+                sheet_secrets = None
+            sheet_config, sheet_config_error = google_sheet_config(sheet_secrets)
+            if sheet_config_error:
+                st.warning(sheet_config_error)
+            elif sheet_config:
+                st.caption(
+                    "Compte Google autorisé : "
+                    f"{sheet_config.get('service_account_email', 'adresse inconnue')}"
+                )
+
+            if st.button(
+                "Mettre à jour depuis la facturation importée",
+                type="primary",
+                disabled=sheet_config is None,
+                key="sync_chantier_google_sheet",
+            ):
+                try:
+                    with st.spinner("Mise à jour du tableau partagé..."):
+                        sync_result = sync_tracking_spreadsheet(
+                            forecast,
+                            matches,
+                            sheet_config,
+                        )
+                    new_count = len(sync_result["new_archive_rows"])
+                    st.success(
+                        f"Tableau mis à jour : {len(sync_result['active_rows'])} dossier(s) "
+                        f"restant(s), {new_count} nouveau(x) dossier(s) facturé(s) archivé(s)."
+                    )
+                    st.link_button(
+                        "Ouvrir le tableau partagé",
+                        "https://docs.google.com/spreadsheets/d/"
+                        f"{sheet_config['spreadsheet_id']}/edit",
+                    )
+                except Exception as exc:
+                    st.error(f"Mise à jour Google Sheets impossible : {exc}")
+
         remaining_xlsx = create_chantier_remaining_workbook(remaining)
         st.download_button(
             "📥 Télécharger toutes les commandes non posées",
