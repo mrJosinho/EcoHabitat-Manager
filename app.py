@@ -4225,6 +4225,10 @@ if role == "admin" and periodes_dispo:
 
 # ====================== IMPORT ADMIN ======================
 
+def reset_import_period_confirmation():
+    st.session_state["periode_import_confirmed"] = False
+
+
 if role == "admin":
 
     st.sidebar.markdown("---")
@@ -4234,9 +4238,30 @@ if role == "admin":
         f_ok = st.file_uploader("Fichier BONLIVR (optionnel)", type=["xlsx"], key="upload_ok")
         st.caption("En début de mois, tu peux lancer le traitement avec seulement CONFIRM. Les livraisons seront à 0 jusqu'à l'import BONLIVR.")
 
-        periode = st.text_input("📅 Période", value="Avril 2026", key="periode_input")
+        periode = st.text_input(
+            "📅 Période",
+            value="Avril 2026",
+            key="periode_input",
+            on_change=reset_import_period_confirmation,
+        )
+        periode_saisie = clean_visible(periode)
+        periode_affichee = periode_saisie or "aucune période saisie"
+        st.warning(
+            f"Vérifie la période avant l'import : les affaires seront enregistrées dans "
+            f"« {periode_affichee} »."
+        )
+        confirmation_periode = st.checkbox(
+            f"Je confirme que cet import concerne bien la période « {periode_affichee} ».",
+            key="periode_import_confirmed",
+            disabled=not periode_saisie,
+        )
 
-        lancer_traitement = st.button("🚀 Lancer le traitement", type="primary")
+        lancer_traitement = st.button(
+            "🚀 Lancer le traitement",
+            type="primary",
+            disabled=not periode_saisie or not confirmation_periode,
+            help="Confirme d'abord la période saisie pour autoriser l'import.",
+        )
 
     if lancer_traitement:
         clear_heavy_session_artifacts()
