@@ -4232,36 +4232,92 @@ def reset_import_period_confirmation():
 if role == "admin":
 
     st.sidebar.markdown("---")
-    with st.sidebar.expander("📤 Import ProDevis", expanded=False):
+    st.sidebar.markdown(
+        """
+        <style>
+        .st-key-import_prodevis_block { position: relative; }
+        .st-key-import_prodevis_expander details > summary { padding-right: 2.75rem; }
+        .st-key-import_prodevis_help {
+            position: absolute;
+            top: 0.35rem;
+            right: 0.4rem;
+            z-index: 3;
+            width: 2rem;
+        }
+        .st-key-import_prodevis_help button {
+            width: 2rem;
+            min-width: 2rem;
+            padding: 0.25rem;
+            border: 0;
+            background: transparent;
+        }
+        .st-key-import_prodevis_help button p { display: none; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.sidebar.container(key="import_prodevis_block"):
+        with st.expander(
+            "📤 Import ProDevis",
+            expanded=False,
+            key="import_prodevis_expander",
+        ):
 
-        f_confirm = st.file_uploader("Fichier CONFIRM", type=["xlsx"], key="upload_confirm")
-        f_ok = st.file_uploader("Fichier BONLIVR (optionnel)", type=["xlsx"], key="upload_ok")
-        st.caption("En début de mois, tu peux lancer le traitement avec seulement CONFIRM. Les livraisons seront à 0 jusqu'à l'import BONLIVR.")
+            f_confirm = st.file_uploader("Fichier CONFIRM", type=["xlsx"], key="upload_confirm")
+            f_ok = st.file_uploader("Fichier BONLIVR (optionnel)", type=["xlsx"], key="upload_ok")
+            st.caption("En début de mois, tu peux lancer le traitement avec seulement CONFIRM. Les livraisons seront à 0 jusqu'à l'import BONLIVR.")
 
-        periode = st.text_input(
-            "📅 Période",
-            value="Avril 2026",
-            key="periode_input",
-            on_change=reset_import_period_confirmation,
-        )
-        periode_saisie = clean_visible(periode)
-        periode_affichee = periode_saisie or "aucune période saisie"
-        st.warning(
-            f"Vérifie la période avant l'import : les affaires seront enregistrées dans "
-            f"« {periode_affichee} »."
-        )
-        confirmation_periode = st.checkbox(
-            f"Je confirme que cet import concerne bien la période « {periode_affichee} ».",
-            key="periode_import_confirmed",
-            disabled=not periode_saisie,
-        )
+            periode = st.text_input(
+                "📅 Période",
+                value="Avril 2026",
+                key="periode_input",
+                on_change=reset_import_period_confirmation,
+            )
+            periode_saisie = clean_visible(periode)
+            periode_affichee = periode_saisie or "aucune période saisie"
+            st.warning(
+                f"Vérifie la période avant l'import : les affaires seront enregistrées dans "
+                f"« {periode_affichee} »."
+            )
+            confirmation_periode = st.checkbox(
+                f"Je confirme que cet import concerne bien la période « {periode_affichee} ».",
+                key="periode_import_confirmed",
+                disabled=not periode_saisie,
+            )
 
-        lancer_traitement = st.button(
-            "🚀 Lancer le traitement",
-            type="primary",
-            disabled=not periode_saisie or not confirmation_periode,
-            help="Confirme d'abord la période saisie pour autoriser l'import.",
-        )
+            lancer_traitement = st.button(
+                "🚀 Lancer le traitement",
+                type="primary",
+                disabled=not periode_saisie or not confirmation_periode,
+                help="Confirme d'abord la période saisie pour autoriser l'import.",
+            )
+
+        with st.popover(
+            "Aide import",
+            icon=":material/info:",
+            help="Afficher la marche à suivre",
+            type="tertiary",
+            key="import_prodevis_help",
+        ):
+            st.markdown("**Marche à suivre**")
+            st.markdown(
+                """
+                1. Dans ProDevis, exporte le fichier **CONFIRM** de la période concernée.
+                2. Exporte aussi **BONLIVR** pour la même période s'il est disponible.
+                3. Charge **CONFIRM**, puis **BONLIVR** si tu l'as.
+                4. Saisis le **mois et l'année** correspondant aux exports.
+                5. Vérifie la période affichée et coche la confirmation.
+                6. Clique sur **Lancer le traitement**.
+                """
+            )
+            st.info(
+                "En début de mois, CONFIRM suffit. Tu pourras réimporter la même période "
+                "avec BONLIVR dès qu'il sera disponible."
+            )
+            st.warning(
+                "Les affaires sont enregistrées dans la période saisie manuellement : "
+                "contrôle-la attentivement avant de valider."
+            )
 
     if lancer_traitement:
         clear_heavy_session_artifacts()
