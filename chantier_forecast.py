@@ -421,7 +421,7 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
         "invoice_no", "invoice_order_no", "invoice_date", "invoice_client",
         "invoice_amount_ht", "candidate_order_no", "candidate_client",
         "candidate_amount_ht", "amount_difference_ht", "confidence",
-        "matching_clues", "non_match_reason",
+        "matching_clues", "non_match_reason", "candidate_order_keys",
     ]
     if remaining_orders.empty or unmatched_invoices.empty:
         return pd.DataFrame(columns=columns)
@@ -577,6 +577,9 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
             "confidence": confidence,
             "matching_clues": matching_clues,
             "non_match_reason": non_match_reason,
+            "candidate_order_keys": "|".join(
+                clean_text(order.get("order_key")) for order in best["orders"]
+            ),
         })
 
     if not suggestions:
@@ -587,9 +590,55 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
     ).reset_index(drop=True)
 
 
-def build_chantier_forecast(orders, invoices, today=None, delivery_months=2):
+def build_chantier_forecast(
+    orders,
+    invoices,
+    today=None,
+    delivery_months=2,
+    manual_invoice_matches=None,
+):
     today = pd.Timestamp(today or datetime.today()).normalize()
     matches, unmatched = match_invoices_to_orders(orders, invoices)
+    manual_invoice_matches = (
+        manual_invoice_matches if isinstance(manual_invoice_matches, dict) else {}
+    )
+    manual_rows = []
+    automatic_invoice_numbers = (
+        set(matches["invoice_no"].map(clean_text)) if not matches.empty else set()
+    )
+    for invoice_no, order_keys in manual_invoice_matches.items():
+        invoice_no = clean_text(invoice_no)
+        if not invoice_no or invoice_no in automatic_invoice_numbers:
+            continue
+        if not isinstance(order_keys, list):
+            order_keys = [order_keys]
+        invoice_candidates = invoices[invoices["invoice_no"].map(clean_text) == invoice_no]
+        if invoice_candidates.empty:
+            continue
+        invoice = invoice_candidates.iloc[-1]
+        for order_key in order_keys:
+            normalized_order_key = normalize_text(order_key)
+            order_candidates = orders[orders["order_key"].map(normalize_text) == normalized_order_key]
+            if order_candidates.empty:
+                continue
+            selected = order_candidates.iloc[-1]
+            manual_rows.append({
+                "invoice_no": invoice_no,
+                "invoice_order_no": clean_text(invoice.get("order_no")),
+                "invoice_date": invoice.get("invoice_date"),
+                "invoice_amount_ht": float(invoice.get("amount_ht", 0.0)),
+                "order_key": selected.get("order_key", ""),
+                "order_no": selected.get("order_no", ""),
+                "confidence": "Validation manuelle",
+            })
+    if manual_rows:
+        matches = pd.concat([matches, pd.DataFrame(manual_rows)], ignore_index=True)
+        manual_invoice_numbers = {row["invoice_no"] for row in manual_rows}
+        if not unmatched.empty:
+            unmatched = unmatched[
+                ~unmatched["invoice_no"].map(clean_text).isin(manual_invoice_numbers)
+            ].copy()
+
     matched_keys = set(matches["order_key"].dropna()) if not matches.empty else set()
     matched_invoice_map = (
         matches.groupby("order_key")["invoice_no"].apply(lambda values: " / ".join(sorted(set(values)))).to_dict()

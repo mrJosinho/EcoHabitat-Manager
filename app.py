@@ -6825,8 +6825,14 @@ def afficher_prevision_chantiers(tab):
             st.warning("Aucune commande confirmée exploitable n'a été trouvée dans l'historique.")
             return
 
+        manual_invoice_matches = settings_chantiers.get("chantier_manual_invoice_matches", {})
+        if not isinstance(manual_invoice_matches, dict):
+            manual_invoice_matches = {}
         forecast, matches, unmatched_invoices = build_chantier_forecast(
-            orders, invoices, delivery_months=delivery_months
+            orders,
+            invoices,
+            delivery_months=delivery_months,
+            manual_invoice_matches=manual_invoice_matches,
         )
         inferred_categories = forecast["client_ref"].apply(infer_chantier_product_category)
         forecast["suggested_category"] = inferred_categories.map(lambda result: result[0])
@@ -6983,6 +6989,9 @@ def afficher_prevision_chantiers(tab):
 
         remaining = forecast[~forecast["is_installed"]].copy()
         potential_matches = find_potential_invoice_matches(remaining, unmatched_invoices)
+        manual_match_flash = st.session_state.pop("chantier_manual_match_flash", "")
+        if manual_match_flash:
+            st.success(manual_match_flash)
         with st.expander(
             f"🔎 Rapprochements potentiels à contrôler ({len(potential_matches)})",
             expanded=False,
@@ -6995,7 +7004,10 @@ def afficher_prevision_chantiers(tab):
             if potential_matches.empty:
                 st.info("Aucun rapprochement potentiel suffisamment fiable.")
             else:
-                potential_display = potential_matches.rename(columns={
+                potential_editor = potential_matches.copy()
+                potential_editor.insert(0, "Valider", False)
+                potential_editor = potential_editor.drop(columns=["candidate_order_keys"])
+                potential_editor = potential_editor.rename(columns={
                     "confidence": "Confiance",
                     "invoice_no": "N° facture",
                     "invoice_order_no": "N° commande indiqué sur la facture",
@@ -7009,17 +7021,101 @@ def afficher_prevision_chantiers(tab):
                     "matching_clues": "Pourquoi le rapprochement semble possible",
                     "non_match_reason": "Pourquoi Manager ne l'a pas rapproché",
                 })
-                st.dataframe(
-                    potential_display,
+                edited_potential_matches = st.data_editor(
+                    potential_editor,
                     use_container_width=True,
                     hide_index=True,
+                    disabled=[
+                        column for column in potential_editor.columns if column != "Valider"
+                    ],
                     column_config={
+                        "Valider": st.column_config.CheckboxColumn(
+                            "Valider", help="Associer cette facture à la ou aux commandes proposées."
+                        ),
                         "Date facture": st.column_config.DateColumn(format="DD/MM/YYYY"),
                         "Montant facture HT": st.column_config.NumberColumn(format="%.2f €"),
                         "Montant commande(s) HT": st.column_config.NumberColumn(format="%.2f €"),
                         "Écart HT": st.column_config.NumberColumn(format="%.2f €"),
                     },
+                    key="chantier_potential_match_editor",
                 )
+                if st.button(
+                    "Valider les rapprochements sélectionnés",
+                    type="primary",
+                    key="validate_chantier_potential_matches",
+                ):
+                    selected_indexes = edited_potential_matches.index[
+                        edited_potential_matches["Valider"]
+                    ].tolist()
+                    if not selected_indexes:
+                        st.warning("Coche au moins un rapprochement à valider.")
+                    else:
+                        latest_settings = load_settings()
+                        saved_matches = latest_settings.get(
+                            "chantier_manual_invoice_matches", {}
+                        )
+                        if not isinstance(saved_matches, dict):
+                            saved_matches = {}
+                        for row_index in selected_indexes:
+                            source_row = potential_matches.loc[row_index]
+                            saved_matches[clean_visible(source_row["invoice_no"])] = [
+                                clean_visible(order_key)
+                                for order_key in str(source_row["candidate_order_keys"]).split("|")
+                                if clean_visible(order_key)
+                            ]
+                        latest_settings["chantier_manual_invoice_matches"] = saved_matches
+                        save_settings(latest_settings)
+                        st.session_state["chantier_manual_match_flash"] = (
+                            f"{len(selected_indexes)} rapprochement(s) validé(s) manuellement."
+                        )
+                        st.rerun()
+
+            if manual_invoice_matches:
+                st.divider()
+                st.markdown("**Rapprochements validés manuellement**")
+                manual_rows = []
+                for invoice_no, order_keys in manual_invoice_matches.items():
+                    if not isinstance(order_keys, list):
+                        order_keys = [order_keys]
+                    manual_rows.append({
+                        "Annuler": False,
+                        "N° facture": invoice_no,
+                        "Commande(s) associée(s)": " + ".join(map(str, order_keys)),
+                    })
+                manual_editor = st.data_editor(
+                    pd.DataFrame(manual_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    disabled=["N° facture", "Commande(s) associée(s)"],
+                    column_config={
+                        "Annuler": st.column_config.CheckboxColumn("Annuler la validation"),
+                    },
+                    key="chantier_manual_match_cancel_editor",
+                )
+                if st.button(
+                    "Annuler les validations sélectionnées",
+                    key="cancel_chantier_manual_matches",
+                ):
+                    invoices_to_remove = set(
+                        manual_editor.loc[manual_editor["Annuler"], "N° facture"].map(clean_visible)
+                    )
+                    if not invoices_to_remove:
+                        st.warning("Coche au moins une validation à annuler.")
+                    else:
+                        latest_settings = load_settings()
+                        saved_matches = latest_settings.get(
+                            "chantier_manual_invoice_matches", {}
+                        )
+                        if not isinstance(saved_matches, dict):
+                            saved_matches = {}
+                        for invoice_no in invoices_to_remove:
+                            saved_matches.pop(invoice_no, None)
+                        latest_settings["chantier_manual_invoice_matches"] = saved_matches
+                        save_settings(latest_settings)
+                        st.session_state["chantier_manual_match_flash"] = (
+                            f"{len(invoices_to_remove)} validation(s) manuelle(s) annulée(s)."
+                        )
+                        st.rerun()
 
         total_remaining = float(remaining["amount_ht"].sum()) if not remaining.empty else 0.0
         status_summary = (

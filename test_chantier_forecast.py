@@ -3,6 +3,7 @@ import unittest
 import pandas as pd
 
 from chantier_forecast import (
+    build_chantier_forecast,
     find_potential_invoice_matches,
     match_invoices_to_orders,
     normalize_text,
@@ -50,6 +51,35 @@ def invoice_row(order_no, client_ref, sale_month_label="AVRIL 26"):
 
 
 class InvoiceMatchingTests(unittest.TestCase):
+    def test_manual_match_can_install_two_orders_from_one_invoice(self):
+        orders = pd.DataFrame([
+            order_row("CDGHRI04170", "NAPPE REVETEMENT", sale_date="2026-05-27"),
+            order_row("CDGHRI04171", "NAPPE MOTORISATION", sale_date="2026-05-27"),
+        ])
+        invoice = invoice_row("CDGHRI04182", "NAPPE ENSEMBLE")
+        invoice.update({
+            "invoice_no": "FACT04227",
+            "invoice_date": pd.Timestamp("2026-10-19"),
+            "amount_ht": 25909.09,
+        })
+
+        forecast, matches, unmatched = build_chantier_forecast(
+            orders,
+            pd.DataFrame([invoice]),
+            today="2026-11-02",
+            manual_invoice_matches={
+                "FACT04227": [
+                    normalize_text("CDGHRI04170"),
+                    normalize_text("CDGHRI04171"),
+                ]
+            },
+        )
+
+        self.assertTrue(forecast["is_installed"].all())
+        self.assertEqual(len(matches), 2)
+        self.assertTrue((matches["confidence"] == "Validation manuelle").all())
+        self.assertTrue(unmatched.empty)
+
     def test_potential_match_explains_different_order_number(self):
         orders = pd.DataFrame([
             order_row("CD03829", "LEROUGE SOIN TOITURE", sale_date="2026-02-24")
