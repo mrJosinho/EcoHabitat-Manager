@@ -48,6 +48,40 @@ class FakeSpreadsheet:
 
 
 class TrackingPayloadTests(unittest.TestCase):
+    def test_active_order_is_removed_from_archive_after_manual_match_cancel(self):
+        forecast = pd.DataFrame([{
+            "is_installed": False,
+            "sale_date": pd.Timestamp("2026-05-27"),
+            "client_ref": "NAPPE REVETEMENT",
+            "order_no": "CDGHRI04170",
+            "order_key": "CDGHRI04170",
+            "source_period": "Avril 2026",
+            "product_category": "PRODUIT EXTERIEUR",
+            "status": "Pose possible",
+            "amount_ht": 21727.27,
+            "earliest_install_date": pd.Timestamp("2026-07-27"),
+            "agency": "MAROMME",
+            "sellers": "GHRISSI Jelloul",
+            "classification_source": "Reference affaire",
+            "classification_confidence": "MOYENNE",
+        }])
+        archived_row = [
+            "Avril 2026", "CDGHRI04170", "NAPPE REVETEMENT",
+            "PRODUIT EXTERIEUR", "Pose possible", 21727.27,
+        ] + [""] * 13
+        old_archive_rows = [[""], [""], [""], [""]] + [archived_row]
+
+        payload = build_tracking_payload(
+            forecast,
+            pd.DataFrame(),
+            [],
+            old_archive_rows,
+            now="2026-11-02",
+        )
+
+        self.assertEqual(len(payload["active_rows"]), 1)
+        self.assertEqual(payload["archive_rows"], [])
+
     def test_periods_with_different_case_are_consolidated(self):
         forecast = pd.DataFrame([{
             "is_installed": False,

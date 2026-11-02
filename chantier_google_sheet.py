@@ -147,7 +147,6 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
     archive_rows = _normalize_existing_archive(old_archive_rows)
     for archive_row in archive_rows:
         archive_row[0] = _canonical_period(archive_row[0])
-    archived_keys = {_key(row[1]) for row in archive_rows}
 
     current = forecast[~forecast["is_installed"]].copy()
     current = current.sort_values(["sale_date", "client_ref"], na_position="last")
@@ -173,6 +172,8 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
         ])
 
     active_keys = {_key(row[1]) for row in active_rows}
+    archive_rows = [row for row in archive_rows if _key(row[1]) not in active_keys]
+    archived_keys = {_key(row[1]) for row in archive_rows}
     removed_keys = [key for key in active_notes if key not in active_keys and key not in archived_keys]
 
     forecast_lookup = {}
