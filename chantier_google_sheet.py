@@ -253,10 +253,36 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
     }
 
 
-def _get_or_create_month_sheet(spreadsheet, title, template_sheet):
+def _find_equivalent_worksheet(worksheets, title):
+    title_key = _key(title)
+    for worksheet in worksheets:
+        if worksheet.title == title:
+            return worksheet
+    for worksheet in worksheets:
+        if _key(worksheet.title) == title_key:
+            return worksheet
+    return None
+
+
+def _is_month_sheet_title(title):
+    normalized = unicodedata.normalize("NFKD", _clean(title).upper())
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    return bool(re.fullmatch(r"[A-Z]+\s+20\d{2}", normalized))
+
+
+def _get_or_create_month_sheet(spreadsheet, title, template_sheet, worksheets=None):
+    worksheets = list(worksheets or spreadsheet.worksheets())
+    existing = _find_equivalent_worksheet(worksheets, title)
+    if existing is not None:
+        return existing
     try:
         return spreadsheet.worksheet(title)
     except Exception:
+        existing = _find_equivalent_worksheet(spreadsheet.worksheets(), title)
+        if existing is not None:
+            return existing
         if template_sheet is not None:
             return spreadsheet.duplicate_sheet(
                 template_sheet.id,
@@ -521,16 +547,25 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
         payload["active_rows"],
     )
 
+    worksheets = spreadsheet.worksheets()
     month_sheets = {
-        worksheet.title: worksheet
-        for worksheet in spreadsheet.worksheets()
-        if re.match(r"^[A-Za-z]+ 20\d{2}$", worksheet.title)
+        _key(worksheet.title): worksheet
+        for worksheet in worksheets
+        if _is_month_sheet_title(worksheet.title)
     }
     template_sheet = next(iter(month_sheets.values()), None)
     for period in payload["periods"]:
-        period_sheet = month_sheets.get(period) or _get_or_create_month_sheet(
-            spreadsheet, period, template_sheet
-        )
+        period_key = _key(period)
+        period_sheet = month_sheets.get(period_key)
+        if period_sheet is None:
+            period_sheet = _get_or_create_month_sheet(
+                spreadsheet,
+                period,
+                template_sheet,
+                worksheets=worksheets,
+            )
+            worksheets.append(period_sheet)
+            month_sheets[period_key] = period_sheet
         period_rows = [row for row in payload["active_rows"] if row[0] == period]
         _write_tracking_worksheet(
             period_sheet,

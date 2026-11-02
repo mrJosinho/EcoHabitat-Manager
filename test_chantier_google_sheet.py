@@ -2,7 +2,39 @@ import unittest
 
 import pandas as pd
 
-from chantier_google_sheet import build_tracking_payload
+from chantier_google_sheet import (
+    _find_equivalent_worksheet,
+    _get_or_create_month_sheet,
+    _is_month_sheet_title,
+    build_tracking_payload,
+)
+
+
+class FakeWorksheet:
+    def __init__(self, title, worksheet_id=1):
+        self.title = title
+        self.id = worksheet_id
+
+
+class FakeSpreadsheet:
+    def __init__(self, worksheets):
+        self._worksheets = worksheets
+        self.duplicate_calls = 0
+        self.add_calls = 0
+
+    def worksheets(self):
+        return list(self._worksheets)
+
+    def worksheet(self, title):
+        raise RuntimeError(f"Exact worksheet not found: {title}")
+
+    def duplicate_sheet(self, *_args, **_kwargs):
+        self.duplicate_calls += 1
+        raise AssertionError("An equivalent worksheet must not be duplicated")
+
+    def add_worksheet(self, *_args, **_kwargs):
+        self.add_calls += 1
+        raise AssertionError("An equivalent worksheet must not be created")
 
 
 class TrackingPayloadTests(unittest.TestCase):
@@ -69,6 +101,31 @@ class TrackingPayloadTests(unittest.TestCase):
         self.assertAlmostEqual(payload["new_archive_amount"], 199.5)
         self.assertEqual(payload["chart_rows"][0], ["Janvier 2026", 100.0, 50.0])
         self.assertEqual(payload["chart_rows"][1], ["Fevrier 2026", 300.0, 199.5])
+
+
+class WorksheetLookupTests(unittest.TestCase):
+    def test_equivalent_month_title_ignores_accents_case_and_spaces(self):
+        worksheet = FakeWorksheet("  FÉVRIER\u00a02026 ")
+
+        self.assertIs(
+            _find_equivalent_worksheet([worksheet], "Fevrier 2026"),
+            worksheet,
+        )
+        self.assertTrue(_is_month_sheet_title(worksheet.title))
+
+    def test_existing_equivalent_sheet_is_reused_before_duplicate(self):
+        worksheet = FakeWorksheet("Janvier 2026 ")
+        spreadsheet = FakeSpreadsheet([worksheet])
+
+        result = _get_or_create_month_sheet(
+            spreadsheet,
+            "Janvier 2026",
+            template_sheet=FakeWorksheet("Mars 2026", worksheet_id=2),
+        )
+
+        self.assertIs(result, worksheet)
+        self.assertEqual(spreadsheet.duplicate_calls, 0)
+        self.assertEqual(spreadsheet.add_calls, 0)
 
 
 if __name__ == "__main__":
