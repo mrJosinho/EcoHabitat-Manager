@@ -317,18 +317,31 @@ def match_invoices_to_orders(orders, invoices):
         if invoice_order_key.startswith("CD"):
             direct_candidates = grouped_order_numbers.get(invoice_order_key, pd.DataFrame())
             if direct_candidates.empty:
-                row = invoice.to_dict()
                 inferred_status = infer_unmatched_invoice_status(invoice)
-                row["match_status"] = (
-                    inferred_status
-                    if inferred_status == "Vente N-1 présumée"
-                    else "N° commande introuvable"
+                fallback_candidates = grouped_orders.get(
+                    invoice.get("match_key"), pd.DataFrame()
                 )
-                row["matched_order_key"] = ""
-                unmatched_rows.append(row)
-                continue
-            selected = direct_candidates.iloc[0]
-            confidence = "N° commande"
+                if not fallback_candidates.empty:
+                    fallback_candidates = fallback_candidates[
+                        fallback_candidates["sale_date"].notna()
+                        & (fallback_candidates["sale_date"] <= invoice.get("invoice_date"))
+                    ]
+                if inferred_status != "Vente N-1 présumée" and len(fallback_candidates) == 1:
+                    selected = fallback_candidates.iloc[0]
+                    confidence = "Libellé exact (n° commande différent)"
+                else:
+                    row = invoice.to_dict()
+                    row["match_status"] = (
+                        inferred_status
+                        if inferred_status == "Vente N-1 présumée"
+                        else "N° commande introuvable"
+                    )
+                    row["matched_order_key"] = ""
+                    unmatched_rows.append(row)
+                    continue
+            else:
+                selected = direct_candidates.iloc[0]
+                confidence = "N° commande"
         else:
             candidates = grouped_orders.get(invoice.get("match_key"), pd.DataFrame())
             if candidates.empty:
