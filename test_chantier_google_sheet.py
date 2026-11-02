@@ -6,6 +6,8 @@ from chantier_google_sheet import (
     _find_equivalent_worksheet,
     _get_or_create_month_sheet,
     _is_month_sheet_title,
+    _write_summary,
+    _write_tracking_worksheet,
     build_tracking_payload,
 )
 
@@ -14,6 +16,14 @@ class FakeWorksheet:
     def __init__(self, title, worksheet_id=1):
         self.title = title
         self.id = worksheet_id
+        self.clear_calls = []
+        self.update_calls = []
+
+    def batch_clear(self, ranges):
+        self.clear_calls.append(ranges)
+
+    def update(self, **kwargs):
+        self.update_calls.append(kwargs)
 
 
 class FakeSpreadsheet:
@@ -102,8 +112,32 @@ class TrackingPayloadTests(unittest.TestCase):
         self.assertEqual(payload["chart_rows"][0], ["Janvier 2026", 100.0, 50.0])
         self.assertEqual(payload["chart_rows"][1], ["Fevrier 2026", 300.0, 199.5])
 
+        worksheet = FakeWorksheet("Synthese")
+        _write_summary(worksheet, payload)
+        self.assertEqual(len(worksheet.clear_calls), 1)
+        self.assertEqual(len(worksheet.update_calls), 1)
+        summary_values = worksheet.update_calls[0]["values"]
+        self.assertEqual(summary_values[0][0], "RAPPORT COMMANDES NON POSEES ET NOTES")
+        self.assertEqual(summary_values[11][:6], [
+            "Mois", "Commandes", "Montant HT", "Avec note", "Sans note", "Notes Joseph",
+        ])
+        self.assertEqual(summary_values[11][6:], [
+            "Mois commercial", "CA restant non pose HT", "CA facture recemment HT",
+        ])
+
 
 class WorksheetLookupTests(unittest.TestCase):
+    def test_tracking_sheet_is_written_with_one_update_request(self):
+        worksheet = FakeWorksheet("Janvier 2026")
+        row = ["Janvier 2026"] + [""] * 13
+
+        _write_tracking_worksheet(worksheet, "Titre", "Sous-titre", [row])
+
+        self.assertEqual(len(worksheet.clear_calls), 1)
+        self.assertEqual(len(worksheet.update_calls), 1)
+        self.assertEqual(worksheet.update_calls[0]["range_name"], "A1:N5")
+        self.assertEqual(worksheet.update_calls[0]["values"][4], row)
+
     def test_equivalent_month_title_ignores_accents_case_and_spaces(self):
         worksheet = FakeWorksheet("  FÉVRIER\u00a02026 ")
 

@@ -299,15 +299,13 @@ def _write_tracking_worksheet(worksheet, title, subtitle, rows):
         "Note du rapport", "Notes Joseph",
     ]
     worksheet.batch_clear(["A1:N400"])
-    worksheet.update(values=[[title]], range_name="A1")
-    worksheet.update(values=[[subtitle]], range_name="A2")
-    worksheet.update(values=[headers], range_name="A4:N4")
-    if rows:
-        worksheet.update(
-            values=rows,
-            range_name=f"A5:N{len(rows) + 4}",
-            value_input_option="USER_ENTERED",
-        )
+    values = [[title], [subtitle], [""], headers]
+    values.extend(rows)
+    worksheet.update(
+        values=values,
+        range_name=f"A1:N{len(values)}",
+        value_input_option="USER_ENTERED",
+    )
 
 
 def _write_archive(worksheet, payload):
@@ -320,49 +318,58 @@ def _write_archive(worksheet, payload):
     ]
     rows = payload["archive_rows"]
     worksheet.batch_clear(["A1:S500"])
-    worksheet.update(values=[["CHANTIERS RETIRES DU SUIVI CAR FACTURES"]], range_name="A1")
-    worksheet.update(values=[[
-        f"{len(rows)} chantiers - {payload['archive_amount']:.2f} EUR HT factures - "
-        f"Mise a jour du {payload['updated_at']}"
-    ]], range_name="A2")
-    worksheet.update(values=[headers], range_name="A4:S4")
-    if rows:
-        worksheet.update(
-            values=rows,
-            range_name=f"A5:S{len(rows) + 4}",
-            value_input_option="USER_ENTERED",
-        )
+    values = [
+        ["CHANTIERS RETIRES DU SUIVI CAR FACTURES"],
+        [
+            f"{len(rows)} chantiers - {payload['archive_amount']:.2f} EUR HT factures - "
+            f"Mise a jour du {payload['updated_at']}"
+        ],
+        [""],
+        headers,
+    ]
+    values.extend(rows)
+    worksheet.update(
+        values=values,
+        range_name=f"A1:S{len(values)}",
+        value_input_option="USER_ENTERED",
+    )
 
 
 def _write_summary(worksheet, payload):
     active_count = len(payload["active_rows"])
     new_count = len(payload["new_archive_rows"])
-    worksheet.batch_clear(["A1:I200"])
-    worksheet.update(values=[["RAPPORT COMMANDES NON POSEES ET NOTES"]], range_name="A1")
-    worksheet.update(values=[[
-        f"Mise a jour facturation au {payload['updated_at']} - "
-        "rapprochement par numero de commande"
-    ]], range_name="A2")
-    worksheet.update(values=[
+    indicators = [
         ["Indicateur", "Valeur", "", "Mise a jour facturation", "Valeur"],
         ["Commandes non posees", active_count, "", "Nouveaux chantiers factures", new_count],
         ["Montant total HT", payload["active_amount"], "", "Montant nouvellement facture HT", payload["new_archive_amount"]],
         ["Commandes avec note du rapport", payload["report_notes"], "", "Total retire du suivi", len(payload["archive_rows"])],
         ["Commandes sans note du rapport", payload["without_report_note"], "", "Montant total retire HT", payload["archive_amount"]],
         ["Commandes avec note Joseph", payload["joseph_notes"], "", "Derniere facture integree", payload["latest_invoice"]],
-    ], range_name="A4:E9", value_input_option="USER_ENTERED")
+    ]
     monthly = [["Mois", "Commandes", "Montant HT", "Avec note", "Sans note", "Notes Joseph"]]
     monthly.extend(payload["monthly"])
     chart = [["Mois commercial", "CA restant non pose HT", "CA facture recemment HT"]]
     chart.extend(payload["chart_rows"])
+
+    values = [
+        ["RAPPORT COMMANDES NON POSEES ET NOTES"],
+        [
+            f"Mise a jour facturation au {payload['updated_at']} - "
+            "rapprochement par numero de commande"
+        ],
+        [""],
+    ]
+    values.extend(indicators)
+    values.extend([[""], [""]])
+    for index in range(max(len(monthly), len(chart))):
+        monthly_row = monthly[index] if index < len(monthly) else [""] * 6
+        chart_row = chart[index] if index < len(chart) else [""] * 3
+        values.append(list(monthly_row) + list(chart_row))
+
+    worksheet.batch_clear(["A1:I200"])
     worksheet.update(
-        values=monthly,
-        range_name=f"A12:F{11 + len(monthly)}",
-        value_input_option="USER_ENTERED",
-    )
-    worksheet.update(
-        values=chart,
-        range_name=f"G12:I{11 + len(chart)}",
+        values=values,
+        range_name=f"A1:I{len(values)}",
         value_input_option="USER_ENTERED",
     )
 
@@ -511,7 +518,10 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
             "La dependance gspread n'est pas installee. Relance le deploiement Render."
         ) from exc
 
-    client = gspread.service_account_from_dict(config["credentials"])
+    client = gspread.service_account_from_dict(
+        config["credentials"],
+        http_client=gspread.BackOffHTTPClient,
+    )
     spreadsheet = client.open_by_key(config["spreadsheet_id"])
     active_sheet = spreadsheet.worksheet(ACTIVE_SHEET)
     summary_sheet = spreadsheet.worksheet(SUMMARY_SHEET)
