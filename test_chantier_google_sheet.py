@@ -48,6 +48,42 @@ class FakeSpreadsheet:
 
 
 class TrackingPayloadTests(unittest.TestCase):
+    def test_periods_with_different_case_are_consolidated(self):
+        forecast = pd.DataFrame([{
+            "is_installed": False,
+            "sale_date": pd.Timestamp("2026-03-04"),
+            "client_ref": "Client mars",
+            "order_no": "CD03870",
+            "order_key": "CD03870",
+            "source_period": "mars 2026",
+            "product_category": "MEN",
+            "status": "Pose possible",
+            "amount_ht": 17251.19,
+            "earliest_install_date": pd.Timestamp("2026-05-04"),
+            "agency": "YVETOT",
+            "sellers": "JOLY Sylvestre",
+            "classification_source": "Reference affaire",
+            "classification_confidence": "MOYENNE",
+        }])
+        old_archive_rows = [
+            [""], [""], [""], [""],
+            ["Mars 2026", "CD03800", "Ancien client", "MEN", "Facture", 1000]
+            + [""] * 13,
+        ]
+
+        payload = build_tracking_payload(
+            forecast,
+            pd.DataFrame(),
+            [],
+            old_archive_rows,
+            now="2026-11-02",
+        )
+
+        self.assertEqual(payload["periods"], ["Mars 2026"])
+        self.assertEqual(payload["active_rows"][0][0], "Mars 2026")
+        self.assertEqual(payload["archive_rows"][0][0], "Mars 2026")
+        self.assertEqual(payload["monthly"][0][1], 1)
+
     def test_notes_are_kept_and_new_invoice_is_archived(self):
         forecast = pd.DataFrame([
             {

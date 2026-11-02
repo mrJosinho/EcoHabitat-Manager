@@ -58,6 +58,21 @@ def _period_sort(value):
     return (int(match.group(2)), months.get(match.group(1), 99), normalized)
 
 
+def _canonical_period(value):
+    month_names = {
+        "JANVIER": "Janvier", "FEVRIER": "Fevrier", "MARS": "Mars",
+        "AVRIL": "Avril", "MAI": "Mai", "JUIN": "Juin",
+        "JUILLET": "Juillet", "AOUT": "Aout", "SEPTEMBRE": "Septembre",
+        "OCTOBRE": "Octobre", "NOVEMBRE": "Novembre", "DECEMBRE": "Decembre",
+    }
+    normalized = unicodedata.normalize("NFKD", _clean(value).upper())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    match = re.search(r"([A-Z]+)\s+(20\d{2})", normalized)
+    if not match or match.group(1) not in month_names:
+        return _clean(value)
+    return f"{month_names[match.group(1)]} {match.group(2)}"
+
+
 def google_sheet_config(secrets_map=None):
     spreadsheet_id = os.getenv("CHANTIER_TRACKING_SPREADSHEET_ID", "").strip()
     raw_credentials = os.getenv("GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON", "").strip()
@@ -130,6 +145,8 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
     now = pd.Timestamp(now or datetime.now()).normalize()
     active_notes = _active_notes(old_active_rows)
     archive_rows = _normalize_existing_archive(old_archive_rows)
+    for archive_row in archive_rows:
+        archive_row[0] = _canonical_period(archive_row[0])
     archived_keys = {_key(row[1]) for row in archive_rows}
 
     current = forecast[~forecast["is_installed"]].copy()
@@ -139,7 +156,7 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
         order_no = _clean(row.get("order_no")) or _clean(row.get("order_key"))
         note = active_notes.get(_key(order_no), {})
         active_rows.append([
-            _clean(row.get("source_period")),
+            _canonical_period(row.get("source_period")),
             order_no,
             _clean(row.get("client_ref")),
             _clean(row.get("product_category")),
