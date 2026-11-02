@@ -30,6 +30,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from chantier_forecast import (
     build_chantier_forecast,
     build_orders_from_periods,
+    find_potential_invoice_matches,
     load_facturation_store,
     read_facturation_export,
     replace_facturation_years,
@@ -6981,6 +6982,45 @@ def afficher_prevision_chantiers(tab):
                     st.rerun()
 
         remaining = forecast[~forecast["is_installed"]].copy()
+        potential_matches = find_potential_invoice_matches(remaining, unmatched_invoices)
+        with st.expander(
+            f"🔎 Rapprochements potentiels à contrôler ({len(potential_matches)})",
+            expanded=False,
+        ):
+            st.caption(
+                "Ces rapprochements ne retirent aucun chantier automatiquement. Ils signalent les "
+                "factures dont le client, l'agence, les dates et le montant ressemblent à une ou "
+                "plusieurs commandes encore présentes."
+            )
+            if potential_matches.empty:
+                st.info("Aucun rapprochement potentiel suffisamment fiable.")
+            else:
+                potential_display = potential_matches.rename(columns={
+                    "confidence": "Confiance",
+                    "invoice_no": "N° facture",
+                    "invoice_order_no": "N° commande indiqué sur la facture",
+                    "invoice_date": "Date facture",
+                    "invoice_client": "Client facture",
+                    "invoice_amount_ht": "Montant facture HT",
+                    "candidate_order_no": "Commande(s) candidate(s)",
+                    "candidate_client": "Dossier(s) candidat(s)",
+                    "candidate_amount_ht": "Montant commande(s) HT",
+                    "amount_difference_ht": "Écart HT",
+                    "matching_clues": "Pourquoi le rapprochement semble possible",
+                    "non_match_reason": "Pourquoi Manager ne l'a pas rapproché",
+                })
+                st.dataframe(
+                    potential_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Date facture": st.column_config.DateColumn(format="DD/MM/YYYY"),
+                        "Montant facture HT": st.column_config.NumberColumn(format="%.2f €"),
+                        "Montant commande(s) HT": st.column_config.NumberColumn(format="%.2f €"),
+                        "Écart HT": st.column_config.NumberColumn(format="%.2f €"),
+                    },
+                )
+
         total_remaining = float(remaining["amount_ht"].sum()) if not remaining.empty else 0.0
         status_summary = (
             remaining.groupby("status")["amount_ht"].agg(["count", "sum"])
@@ -7518,11 +7558,18 @@ def afficher_prevision_chantiers(tab):
                 })
                 st.dataframe(n1_display, use_container_width=True, hide_index=True)
 
-        with st.expander(f"⚠️ Rapprochements à contrôler ({len(ambiguous_invoices)})", expanded=False):
-            if ambiguous_invoices.empty:
-                st.caption("Aucune anomalie de rapprochement.")
+        candidate_invoice_numbers = set(potential_matches["invoice_no"]) if not potential_matches.empty else set()
+        other_ambiguous_invoices = ambiguous_invoices[
+            ~ambiguous_invoices["invoice_no"].isin(candidate_invoice_numbers)
+        ] if not ambiguous_invoices.empty else ambiguous_invoices
+        with st.expander(
+            f"⚠️ Factures sans rapprochement potentiel ({len(other_ambiguous_invoices)})",
+            expanded=False,
+        ):
+            if other_ambiguous_invoices.empty:
+                st.caption("Aucune autre anomalie de rapprochement.")
             else:
-                anomaly_display = ambiguous_invoices[[
+                anomaly_display = other_ambiguous_invoices[[
                     "match_status", "invoice_no", "invoice_date", "client_ref", "agency", "amount_ht"
                 ]].rename(columns={
                     "match_status": "Anomalie", "invoice_no": "N° facture",

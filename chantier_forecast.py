@@ -4,6 +4,7 @@ import pickle
 import re
 import unicodedata
 from difflib import SequenceMatcher
+from itertools import combinations
 from datetime import datetime
 from pathlib import Path
 
@@ -413,6 +414,177 @@ def infer_unmatched_invoice_status(invoice):
     if month and pd.notna(invoice_date) and month > invoice_date.month:
         return "Vente N-1 présumée"
     return "Facture non rapprochée"
+
+
+def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
+    columns = [
+        "invoice_no", "invoice_order_no", "invoice_date", "invoice_client",
+        "invoice_amount_ht", "candidate_order_no", "candidate_client",
+        "candidate_amount_ht", "amount_difference_ht", "confidence",
+        "matching_clues", "non_match_reason",
+    ]
+    if remaining_orders.empty or unmatched_invoices.empty:
+        return pd.DataFrame(columns=columns)
+
+    orders = remaining_orders.copy()
+    if "is_installed" in orders.columns:
+        orders = orders[~orders["is_installed"]].copy()
+    orders["sale_date"] = pd.to_datetime(orders.get("sale_date"), errors="coerce")
+    orders["amount_ht"] = pd.to_numeric(orders.get("amount_ht"), errors="coerce").fillna(0.0)
+    orders["surname_key"] = orders["client_ref"].map(
+        lambda value: normalize_text(value).split(" ")[0]
+    )
+    orders["agency_key"] = orders["agency"].map(normalize_text)
+
+    stop_words = {
+        "DEVIS", "ENSEMBLE", "PLUS", "ET", "DE", "DES", "DU", "LA", "LE",
+        "LES", "AVEC", "POUR", "FOURNITURE", "POSE",
+    }
+
+    def label_tokens(value):
+        tokens = normalize_text(value).split()
+        return {token for token in tokens[1:] if len(token) >= 3 and token not in stop_words}
+
+    def label_similarity(invoice_label, order_label):
+        invoice_tokens = label_tokens(invoice_label)
+        order_tokens = label_tokens(order_label)
+        token_score = (
+            len(invoice_tokens.intersection(order_tokens))
+            / max(len(invoice_tokens.union(order_tokens)), 1)
+        )
+        text_score = SequenceMatcher(
+            None, normalize_text(invoice_label), normalize_text(order_label)
+        ).ratio()
+        return max(token_score, text_score)
+
+    suggestions = []
+    for _, invoice in unmatched_invoices.iterrows():
+        if clean_text(invoice.get("match_status")) == "Vente N-1 présumée":
+            continue
+        invoice_date = pd.to_datetime(invoice.get("invoice_date"), errors="coerce")
+        invoice_amount = abs(float(invoice.get("amount_ht", 0.0)))
+        surname_key = normalize_text(invoice.get("client_ref", "")).split(" ")[0]
+        agency_key = normalize_text(invoice.get("agency", ""))
+        if len(surname_key) < 4 or invoice_amount <= 0:
+            continue
+
+        candidates = orders[
+            (orders["surname_key"] == surname_key)
+            & (orders["agency_key"] == agency_key)
+        ].copy()
+        if pd.notna(invoice_date):
+            candidates = candidates[
+                candidates["sale_date"].notna()
+                & (candidates["sale_date"] <= invoice_date)
+            ]
+        if candidates.empty:
+            continue
+
+        possible = []
+        for _, order in candidates.iterrows():
+            order_amount = abs(float(order.get("amount_ht", 0.0)))
+            difference = abs(invoice_amount - order_amount)
+            difference_ratio = difference / invoice_amount
+            similarity = label_similarity(
+                invoice.get("client_ref", ""), order.get("client_ref", "")
+            )
+            if not (
+                difference_ratio <= 0.08
+                or (difference <= 750 and similarity >= 0.45)
+            ):
+                continue
+            possible.append({
+                "orders": [order],
+                "amount": order_amount,
+                "difference": difference,
+                "difference_ratio": difference_ratio,
+                "similarity": similarity,
+                "is_group": False,
+            })
+
+        candidate_rows = [row for _, row in candidates.iterrows()]
+        for group_size in range(2, min(4, len(candidate_rows)) + 1):
+            for grouped_orders in combinations(candidate_rows, group_size):
+                grouped_amount = sum(abs(float(row.get("amount_ht", 0.0))) for row in grouped_orders)
+                difference = abs(invoice_amount - grouped_amount)
+                difference_ratio = difference / invoice_amount
+                if difference_ratio > 0.06 and difference > 1000:
+                    continue
+                possible.append({
+                    "orders": list(grouped_orders),
+                    "amount": grouped_amount,
+                    "difference": difference,
+                    "difference_ratio": difference_ratio,
+                    "similarity": max(
+                        label_similarity(invoice.get("client_ref", ""), row.get("client_ref", ""))
+                        for row in grouped_orders
+                    ),
+                    "is_group": True,
+                })
+
+        if not possible:
+            continue
+        possible.sort(key=lambda item: (
+            item["difference_ratio"],
+            -item["similarity"],
+            len(item["orders"]),
+        ))
+        best = possible[0]
+        candidate_order_numbers = " + ".join(
+            clean_text(order.get("order_no")) or clean_text(order.get("order_key"))
+            for order in best["orders"]
+        )
+        candidate_clients = " + ".join(
+            clean_text(order.get("client_ref")) for order in best["orders"]
+        )
+        if best["difference_ratio"] <= 0.03 and (
+            best["is_group"] or best["similarity"] >= 0.35
+        ):
+            confidence = "ÉLEVÉE"
+        else:
+            confidence = "MOYENNE"
+
+        invoice_order_no = clean_text(invoice.get("order_no"))
+        if best["is_group"]:
+            non_match_reason = (
+                f"La facture indique {invoice_order_no or 'aucun n° de commande'}, alors que "
+                f"le montant semble regrouper {len(best['orders'])} commandes ({candidate_order_numbers})."
+            )
+        elif invoice_order_no:
+            non_match_reason = (
+                f"Le n° de commande de la facture ({invoice_order_no}) diffère de la commande "
+                f"candidate ({candidate_order_numbers}) et le libellé client n'est pas strictement identique."
+            )
+        else:
+            non_match_reason = (
+                "La facture ne contient aucun n° de commande exploitable et le libellé client "
+                "n'est pas strictement identique."
+            )
+        matching_clues = (
+            f"Même client principal et même agence ; écart de {best['difference']:.2f} € HT "
+            f"({best['difference_ratio'] * 100:.2f} %)."
+        )
+        suggestions.append({
+            "invoice_no": clean_text(invoice.get("invoice_no")),
+            "invoice_order_no": invoice_order_no,
+            "invoice_date": invoice_date,
+            "invoice_client": clean_text(invoice.get("client_ref")),
+            "invoice_amount_ht": invoice_amount,
+            "candidate_order_no": candidate_order_numbers,
+            "candidate_client": candidate_clients,
+            "candidate_amount_ht": best["amount"],
+            "amount_difference_ht": best["difference"],
+            "confidence": confidence,
+            "matching_clues": matching_clues,
+            "non_match_reason": non_match_reason,
+        })
+
+    if not suggestions:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(suggestions, columns=columns).sort_values(
+        ["confidence", "amount_difference_ht"],
+        ascending=[True, True],
+    ).reset_index(drop=True)
 
 
 def build_chantier_forecast(orders, invoices, today=None, delivery_months=2):
