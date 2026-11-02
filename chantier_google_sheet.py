@@ -215,15 +215,17 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
     archive_rows.extend(new_archive_rows)
     archive_rows.sort(key=lambda row: (_period_sort(row[0]), _clean(row[2])))
 
-    periods = sorted(
-        {row[0] for row in active_rows}.union({row[0] for row in archive_rows}),
-        key=_period_sort,
-    )
+    periods_by_key = {}
+    for row in active_rows + archive_rows:
+        canonical_period = _canonical_period(row[0])
+        periods_by_key[_key(canonical_period)] = canonical_period
+    periods = sorted(periods_by_key.values(), key=_period_sort)
     monthly = []
     chart_rows = []
     for period in periods:
-        active_period = [row for row in active_rows if row[0] == period]
-        archive_period = [row for row in archive_rows if row[0] == period]
+        period_key = _key(period)
+        active_period = [row for row in active_rows if _key(row[0]) == period_key]
+        archive_period = [row for row in archive_rows if _key(row[0]) == period_key]
         report_count = sum(
             1 for row in active_period
             if row[12] and not _key(row[12]).startswith(_key(NO_REPORT_NOTE))
@@ -594,7 +596,10 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
             )
             worksheets.append(period_sheet)
             month_sheets[period_key] = period_sheet
-        period_rows = [row for row in payload["active_rows"] if row[0] == period]
+        period_rows = [
+            row for row in payload["active_rows"]
+            if _key(row[0]) == period_key
+        ]
         _write_tracking_worksheet(
             period_sheet,
             f"COMMANDES NON POSEES - {period.upper()}",
