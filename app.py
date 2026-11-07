@@ -37,6 +37,7 @@ from chantier_forecast import (
     save_facturation_store,
 )
 from chantier_google_sheet import google_sheet_config, sync_tracking_spreadsheet
+from commission_source import normalize_commission_columns
 
 # ====================== CONFIG ======================
 
@@ -3351,6 +3352,8 @@ def load_periode_preserve_ui(periode):
     if not saved_data:
         return False
 
+    saved_data = recompute_saved_period(copy.deepcopy(saved_data))
+
     ui_keys = [
         "active_page_admin",
         "active_page_directeur",
@@ -3443,13 +3446,29 @@ def find_imported_affaires(period_data, query):
 
 
 def recompute_saved_period(period_data):
-    df_ok = period_data.get("df_ok", pd.DataFrame()).copy()
-    df_c = period_data.get("df_c", pd.DataFrame()).copy()
     colonnes_commerciaux = [
         period_data.get("col_com1"),
         period_data.get("col_com2"),
         period_data.get("col_com3"),
     ]
+    df_ok = normalize_commission_columns(
+        period_data.get("df_ok", pd.DataFrame()),
+        period_data.get("col_vente"),
+        period_data.get("col_ca_magasin"),
+        period_data.get("col_catalogue"),
+        period_data.get("col_rem"),
+        colonnes_commerciaux,
+    )
+    df_c = normalize_commission_columns(
+        period_data.get("df_c", pd.DataFrame()),
+        period_data.get("col_vente"),
+        period_data.get("col_ca_magasin"),
+        period_data.get("col_catalogue"),
+        period_data.get("col_rem"),
+        colonnes_commerciaux,
+    )
+    period_data["df_ok"] = df_ok
+    period_data["df_c"] = df_c
 
     period_data["df_vendeurs"] = recompute_df_vendeurs_indicators(
         period_data.get("df_vendeurs", pd.DataFrame()).copy(),
@@ -3744,6 +3763,8 @@ def load_all_historique_cached(signature):
 
         if not data:
             continue
+
+        data = recompute_saved_period(copy.deepcopy(data))
 
         mois, annee = periode_to_month_year(periode)
 
@@ -4380,6 +4401,23 @@ if role == "admin":
             st.stop()
 
         colonnes_commerciaux = [col_com1, col_com2, col_com3]
+
+        df_confirm = normalize_commission_columns(
+            df_confirm,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue,
+            col_rem,
+            colonnes_commerciaux,
+        )
+        df_ok = normalize_commission_columns(
+            df_ok,
+            col_vente,
+            col_ca_magasin,
+            col_catalogue,
+            col_rem,
+            colonnes_commerciaux,
+        )
 
         key_cols = []
         for c in [col_client, col_date, col_doc]:
