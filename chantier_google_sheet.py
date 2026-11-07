@@ -183,6 +183,10 @@ def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows,
     match_lookup = {}
     if isinstance(matches, pd.DataFrame) and not matches.empty:
         ordered_matches = matches.copy()
+        if "is_deposit" in ordered_matches.columns:
+            ordered_matches = ordered_matches[
+                ~ordered_matches["is_deposit"].fillna(False).astype(bool)
+            ].copy()
         ordered_matches["invoice_date"] = pd.to_datetime(
             ordered_matches.get("invoice_date"), errors="coerce"
         )

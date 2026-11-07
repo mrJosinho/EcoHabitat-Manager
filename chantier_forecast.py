@@ -22,6 +22,7 @@ FACTURATION_COLUMNS = [
     "seller_3",
     "amount_ht",
     "sale_month_label",
+    "is_deposit",
 ]
 
 
@@ -37,6 +38,25 @@ def normalize_text(value):
     text = "".join(char for char in text if not unicodedata.combining(char))
     text = re.sub(r"[^A-Z0-9]+", " ", text.upper())
     return re.sub(r"\s+", " ", text).strip()
+
+
+def is_deposit_reference(value):
+    return "ACOMPTE" in normalize_text(value).split()
+
+
+def ensure_invoice_flags(invoices):
+    if not isinstance(invoices, pd.DataFrame):
+        return pd.DataFrame(columns=FACTURATION_COLUMNS)
+    invoices = invoices.copy()
+    detected = invoices.get("client_ref", pd.Series("", index=invoices.index)).map(
+        is_deposit_reference
+    )
+    if "is_deposit" in invoices.columns:
+        existing = invoices["is_deposit"].fillna(False).astype(bool)
+        invoices["is_deposit"] = existing | detected
+    else:
+        invoices["is_deposit"] = detected
+    return invoices
 
 
 def _find_column(df, includes, excludes=None):
@@ -113,6 +133,7 @@ def read_facturation_export(source, source_name=""):
     parsed["invoice_date"] = parsed["invoice_date"].dt.normalize()
     parsed["source_file"] = clean_text(source_name)
     parsed["is_credit"] = parsed["amount_ht"] < 0
+    parsed["is_deposit"] = parsed["client_ref"].map(is_deposit_reference)
     parsed["client_key"] = parsed["client_ref"].map(normalize_text)
     parsed["agency_key"] = parsed["agency"].map(normalize_text)
     parsed["match_key"] = parsed["client_key"] + "|" + parsed["agency_key"]
@@ -148,18 +169,23 @@ def load_facturation_store(path):
     with open(path, "rb") as handle:
         payload = pickle.load(handle)
     if isinstance(payload, pd.DataFrame):
-        return {"invoices": payload, "metadata": {}}
+        return {"invoices": ensure_invoice_flags(payload), "metadata": {}}
     if not isinstance(payload, dict):
         return {"invoices": pd.DataFrame(columns=FACTURATION_COLUMNS), "metadata": {}}
     invoices = payload.get("invoices", pd.DataFrame(columns=FACTURATION_COLUMNS))
     if not isinstance(invoices, pd.DataFrame):
         invoices = pd.DataFrame(columns=FACTURATION_COLUMNS)
-    return {"invoices": invoices, "metadata": payload.get("metadata", {})}
+    return {
+        "invoices": ensure_invoice_flags(invoices),
+        "metadata": payload.get("metadata", {}),
+    }
 
 
 def replace_facturation_years(existing, imported):
+    imported = ensure_invoice_flags(imported)
     if existing is None or not isinstance(existing, pd.DataFrame) or existing.empty:
         return imported.copy().reset_index(drop=True)
+    existing = ensure_invoice_flags(existing)
     years = set(imported["invoice_date"].dropna().dt.year.astype(int).tolist())
     existing_dates = pd.to_datetime(existing.get("invoice_date"), errors="coerce")
     kept = existing[~existing_dates.dt.year.isin(years)].copy()
@@ -383,6 +409,9 @@ def match_invoices_to_orders(orders, invoices):
             "invoice_order_no": invoice.get("order_no", ""),
             "invoice_date": invoice.get("invoice_date"),
             "invoice_amount_ht": float(invoice.get("amount_ht", 0.0)),
+            "is_deposit": bool(
+                invoice.get("is_deposit", is_deposit_reference(invoice.get("client_ref", "")))
+            ),
             "order_key": selected.get("order_key", ""),
             "order_no": selected.get("order_no", ""),
             "confidence": confidence,
@@ -627,6 +656,12 @@ def build_chantier_forecast(
                 "invoice_order_no": clean_text(invoice.get("order_no")),
                 "invoice_date": invoice.get("invoice_date"),
                 "invoice_amount_ht": float(invoice.get("amount_ht", 0.0)),
+                "is_deposit": bool(
+                    invoice.get(
+                        "is_deposit",
+                        is_deposit_reference(invoice.get("client_ref", "")),
+                    )
+                ),
                 "order_key": selected.get("order_key", ""),
                 "order_no": selected.get("order_no", ""),
                 "confidence": "Validation manuelle",
@@ -639,17 +674,52 @@ def build_chantier_forecast(
                 ~unmatched["invoice_no"].map(clean_text).isin(manual_invoice_numbers)
             ].copy()
 
-    matched_keys = set(matches["order_key"].dropna()) if not matches.empty else set()
+    if not matches.empty:
+        if "is_deposit" not in matches.columns:
+            matches["is_deposit"] = False
+        matches["is_deposit"] = matches["is_deposit"].fillna(False).astype(bool)
+        final_matches = matches[~matches["is_deposit"]].copy()
+        deposit_matches = matches[matches["is_deposit"]].copy()
+    else:
+        final_matches = matches.copy()
+        deposit_matches = matches.copy()
+
+    matched_keys = (
+        set(final_matches["order_key"].dropna()) if not final_matches.empty else set()
+    )
     matched_invoice_map = (
-        matches.groupby("order_key")["invoice_no"].apply(lambda values: " / ".join(sorted(set(values)))).to_dict()
-        if not matches.empty else {}
+        final_matches.groupby("order_key")["invoice_no"]
+        .apply(lambda values: " / ".join(sorted(set(values))))
+        .to_dict()
+        if not final_matches.empty else {}
+    )
+    deposit_invoice_map = (
+        deposit_matches.groupby("order_key")["invoice_no"]
+        .apply(lambda values: " / ".join(sorted(set(values))))
+        .to_dict()
+        if not deposit_matches.empty else {}
+    )
+    deposit_amount_map = (
+        deposit_matches.groupby("order_key")["invoice_amount_ht"].sum().to_dict()
+        if not deposit_matches.empty else {}
     )
 
     forecast = orders.copy()
     forecast["earliest_install_date"] = forecast["sale_date"] + pd.DateOffset(months=int(delivery_months))
     forecast["days_until_eligible"] = (forecast["earliest_install_date"] - today).dt.days
     forecast["invoice_no"] = forecast["order_key"].map(matched_invoice_map).fillna("")
+    forecast["deposit_invoice_no"] = forecast["order_key"].map(deposit_invoice_map).fillna("")
+    forecast["deposit_invoiced_ht"] = (
+        forecast["order_key"].map(deposit_amount_map).fillna(0.0).astype(float)
+    )
+    forecast["has_deposit"] = forecast["deposit_invoice_no"].ne("")
     forecast["is_installed"] = forecast["order_key"].isin(matched_keys)
+    forecast["billing_status"] = "Aucune facture"
+    forecast.loc[forecast["has_deposit"], "billing_status"] = "Acompte factur\u00e9"
+    forecast.loc[forecast["is_installed"], "billing_status"] = "Factur\u00e9 / pos\u00e9"
+    forecast.loc[
+        forecast["is_installed"] & forecast["has_deposit"], "billing_status"
+    ] = "Acompte + solde factur\u00e9s / pos\u00e9"
 
     def status_for(row):
         if row["is_installed"]:

@@ -5,6 +5,7 @@ import pandas as pd
 from chantier_forecast import (
     build_chantier_forecast,
     find_potential_invoice_matches,
+    is_deposit_reference,
     match_invoices_to_orders,
     normalize_text,
 )
@@ -51,6 +52,59 @@ def invoice_row(order_no, client_ref, sale_month_label="AVRIL 26"):
 
 
 class InvoiceMatchingTests(unittest.TestCase):
+    def test_deposit_word_is_detected_without_false_partial_match(self):
+        self.assertTrue(is_deposit_reference("CHERFILS Acompte : fenetre"))
+        self.assertFalse(is_deposit_reference("ACOMPTESSE TEST"))
+
+    def test_deposit_invoice_keeps_order_to_install(self):
+        orders = pd.DataFrame([order_row("CDSCOL04639", "CHERFILS FENETRE")])
+        invoice = invoice_row("CDSCOL04639", "CHERFILS Acompte : fenetre")
+        invoice.update({
+            "invoice_no": "FACT04306",
+            "amount_ht": 6673.15,
+            "is_deposit": True,
+        })
+
+        forecast, matches, unmatched = build_chantier_forecast(
+            orders, pd.DataFrame([invoice]), today="2026-11-07"
+        )
+
+        self.assertFalse(bool(forecast.iloc[0]["is_installed"]))
+        self.assertTrue(bool(forecast.iloc[0]["has_deposit"]))
+        self.assertEqual(forecast.iloc[0]["billing_status"], "Acompte facturé")
+        self.assertAlmostEqual(forecast.iloc[0]["deposit_invoiced_ht"], 6673.15)
+        self.assertEqual(forecast.iloc[0]["deposit_invoice_no"], "FACT04306")
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(unmatched.empty)
+
+    def test_final_invoice_after_deposit_marks_order_installed(self):
+        orders = pd.DataFrame([order_row("CDSCOL04639", "CHERFILS FENETRE")])
+        deposit = invoice_row("CDSCOL04639", "CHERFILS Acompte : fenetre")
+        deposit.update({
+            "invoice_no": "FACT04306",
+            "amount_ht": 6673.15,
+            "is_deposit": True,
+        })
+        balance = invoice_row("CDSCOL04639", "CHERFILS FENETRE")
+        balance.update({
+            "invoice_no": "FACT04399",
+            "amount_ht": 15570.69,
+            "is_deposit": False,
+        })
+
+        forecast, matches, unmatched = build_chantier_forecast(
+            orders, pd.DataFrame([deposit, balance]), today="2026-11-07"
+        )
+
+        self.assertTrue(bool(forecast.iloc[0]["is_installed"]))
+        self.assertEqual(
+            forecast.iloc[0]["billing_status"], "Acompte + solde facturés / posé"
+        )
+        self.assertEqual(forecast.iloc[0]["invoice_no"], "FACT04399")
+        self.assertAlmostEqual(forecast.iloc[0]["deposit_invoiced_ht"], 6673.15)
+        self.assertEqual(len(matches), 2)
+        self.assertTrue(unmatched.empty)
+
     def test_manual_match_can_install_two_orders_from_one_invoice(self):
         orders = pd.DataFrame([
             order_row("CDGHRI04170", "NAPPE REVETEMENT", sale_date="2026-05-27"),

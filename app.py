@@ -6347,7 +6347,8 @@ def infer_chantier_product_category(reference):
 
 def create_chantier_remaining_workbook(remaining):
     detail_columns = [
-        "client_ref", "order_no", "product_category", "status", "amount_ht", "sale_date",
+        "client_ref", "order_no", "product_category", "status", "billing_status",
+        "deposit_invoice_no", "deposit_invoiced_ht", "amount_ht", "sale_date",
         "earliest_install_date", "agency", "sellers", "source_period", "classification_source",
         "classification_confidence",
     ]
@@ -6358,6 +6359,9 @@ def create_chantier_remaining_workbook(remaining):
         "classification_source": "Origine du classement",
         "classification_confidence": "Confiance automatique",
         "status": "État",
+        "billing_status": "Situation facturation",
+        "deposit_invoice_no": "N° facture d'acompte",
+        "deposit_invoiced_ht": "Acompte facturé HT",
         "client_ref": "Client / Référence affaire",
         "order_no": "N° commande",
         "sale_date": "Date document",
@@ -6512,10 +6516,13 @@ def create_chantier_remaining_workbook(remaining):
             "Agence": 17,
             "Commercial(aux)": 29,
             "Montant HT": 16,
+            "Situation facturation": 25,
+            "N° facture d'acompte": 20,
+            "Acompte facturé HT": 19,
         }
         for column_index, column_name in enumerate(frame.columns, start=1):
             ws.column_dimensions[get_column_letter(column_index)].width = column_widths.get(column_name, 16)
-            if column_name == "Montant HT":
+            if column_name in {"Montant HT", "Acompte facturé HT"}:
                 for row_index in range(5, ws.max_row + 1):
                     ws.cell(row_index, column_index).number_format = '#,##0.00 [$€-fr-FR]'
             if column_name in {"Date document", "Pose possible à partir du"}:
@@ -6784,7 +6791,8 @@ def afficher_prevision_chantiers(tab):
         st.subheader("🏗️ Prévision des chantiers")
         st.caption(
             "Les commandes confirmées sont rapprochées des factures. "
-            "Une facture correspond à un chantier posé ; une commande non facturée reste à poser."
+            "Une facture finale correspond à un chantier posé. Une facture d'acompte est "
+            "comptabilisée dans la facturation, mais le chantier reste à poser."
         )
 
         store = load_facturation_store(FACTURATION_CHANTIERS_FILE)
@@ -7026,6 +7034,13 @@ def afficher_prevision_chantiers(tab):
                     st.rerun()
 
         remaining = forecast[~forecast["is_installed"]].copy()
+        if not matches.empty and "is_deposit" in matches.columns:
+            deposit_mask = matches["is_deposit"].fillna(False).astype(bool)
+            deposit_matches = matches[deposit_mask].copy()
+            final_matches = matches[~deposit_mask].copy()
+        else:
+            deposit_matches = pd.DataFrame()
+            final_matches = matches.copy()
         potential_matches = find_potential_invoice_matches(remaining, unmatched_invoices)
         manual_match_flash = st.session_state.pop("chantier_manual_match_flash", "")
         if manual_match_flash:
@@ -7177,17 +7192,24 @@ def afficher_prevision_chantiers(tab):
 
         delivery_count, delivery_amount = status_values("Attente livraison")
         eligible_count, eligible_amount = status_values("Pose possible")
+        deposit_orders = remaining[remaining["has_deposit"]]
+        deposit_order_count = int(len(deposit_orders))
+        deposit_billed_amount = float(deposit_orders["deposit_invoiced_ht"].sum())
 
-        headline_cols = st.columns(2)
-        headline_cols[0].metric("Commandes sans facture", f"{len(remaining):,}".replace(",", " "))
-        headline_cols[1].metric("CA correspondant", compact_eur(total_remaining))
+        headline_cols = st.columns(3)
+        headline_cols[0].metric("Chantiers restant à poser", f"{len(remaining):,}".replace(",", " "))
+        headline_cols[1].metric("CA restant à poser", compact_eur(total_remaining))
+        headline_cols[2].metric(
+            "Dont avec acompte", deposit_order_count, compact_eur(deposit_billed_amount)
+        )
 
         status_cols = st.columns(2)
         status_cols[0].metric("Attente livraison", delivery_count, compact_eur(delivery_amount))
         status_cols[1].metric("Pose possible", eligible_count, compact_eur(eligible_amount))
         st.info(
-            "Le total comprend toutes les commandes sans facture, y compris les ventes récentes encore "
-            "en attente de livraison. La catégorie « Pose possible » correspond aux dossiers ayant dépassé "
+            "Le total comprend tous les chantiers restant à poser, y compris ceux ayant déjà une facture "
+            "d'acompte. Seule une facture finale hors acompte classe le chantier comme posé. "
+            "La catégorie « Pose possible » correspond aux dossiers ayant dépassé "
             "le délai minimal, sans qu'un retard automatique leur soit attribué."
         )
         st.caption(
@@ -7280,17 +7302,26 @@ def afficher_prevision_chantiers(tab):
         comparison_order = [
             "Commandes confirmées totales",
             "Facturation totale",
+            "Dont factures d'acompte",
             "Dont facturation N-1",
-            "Commandes sans facture",
+            "CA restant à poser",
             "Attente livraison",
             "Pose possible",
         ]
-        comparison_colors = ["#326273", "#5EAF2C", "#E59A25", "#D65F5F", "#D9A21B", "#4C78A8"]
+        comparison_colors = [
+            "#326273", "#5EAF2C", "#7B6AA2", "#E59A25",
+            "#D65F5F", "#D9A21B", "#4C78A8",
+        ]
+        total_deposit_invoiced = (
+            float(invoices.loc[invoices["is_deposit"].fillna(False), "amount_ht"].sum())
+            if "is_deposit" in invoices.columns else 0.0
+        )
         comparison_data = pd.DataFrame({
             "Indicateur": comparison_order,
             "Montant HT": [
                 float(orders["amount_ht"].sum()),
                 total_invoiced,
+                total_deposit_invoiced,
                 n1_invoiced,
                 total_remaining,
                 delivery_amount,
@@ -7644,7 +7675,8 @@ def afficher_prevision_chantiers(tab):
 
         st.markdown("#### Détail des chantiers restant à poser")
         detail = filtered[[
-            "client_ref", "order_no", "product_category", "status", "amount_ht", "sale_date",
+            "client_ref", "order_no", "product_category", "status", "billing_status",
+            "deposit_invoice_no", "deposit_invoiced_ht", "amount_ht", "sale_date",
             "earliest_install_date", "agency", "sellers", "source_period", "classification_source",
             "classification_confidence",
         ]].copy()
@@ -7653,6 +7685,9 @@ def afficher_prevision_chantiers(tab):
             "classification_source": "Origine du classement",
             "classification_confidence": "Confiance automatique",
             "status": "État", "client_ref": "Client / Référence affaire", "order_no": "N° commande",
+            "billing_status": "Situation facturation",
+            "deposit_invoice_no": "N° facture d'acompte",
+            "deposit_invoiced_ht": "Acompte facturé HT",
             "sale_date": "Date vente", "earliest_install_date": "Pose possible à partir du",
             "agency": "Agence", "sellers": "Commercial(aux)", "amount_ht": "Montant HT",
             "source_period": "Période source",
@@ -7663,6 +7698,7 @@ def afficher_prevision_chantiers(tab):
                 "Date vente": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "Pose possible à partir du": st.column_config.DateColumn(format="DD/MM/YYYY"),
                 "Montant HT": st.column_config.NumberColumn(format="%.2f €"),
+                "Acompte facturé HT": st.column_config.NumberColumn(format="%.2f €"),
             },
         )
 
@@ -7673,11 +7709,20 @@ def afficher_prevision_chantiers(tab):
             n1_invoices = unmatched_invoices[unmatched_invoices["match_status"] == "Vente N-1 présumée"].copy()
             ambiguous_invoices = unmatched_invoices[unmatched_invoices["match_status"] != "Vente N-1 présumée"].copy()
 
-        with st.expander(f"📦 Chantiers posés rapprochés ({len(matches)})", expanded=False):
-            if matches.empty:
+        with st.expander(f"📦 Chantiers posés rapprochés ({len(final_matches)})", expanded=False):
+            if final_matches.empty:
                 st.caption("Aucun rapprochement automatique.")
             else:
-                st.dataframe(matches, use_container_width=True, hide_index=True)
+                st.dataframe(final_matches, use_container_width=True, hide_index=True)
+
+        with st.expander(f"Factures d'acompte rapprochées ({len(deposit_matches)})", expanded=False):
+            if deposit_matches.empty:
+                st.caption("Aucune facture d'acompte rapprochée.")
+            else:
+                st.caption(
+                    "Ces factures sont incluses dans la facturation, mais les chantiers restent à poser."
+                )
+                st.dataframe(deposit_matches, use_container_width=True, hide_index=True)
 
         with st.expander(f"🕘 Facturation provenant de N-1 ({len(n1_invoices)})", expanded=False):
             if n1_invoices.empty:
