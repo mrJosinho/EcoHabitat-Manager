@@ -129,6 +129,42 @@ def _active_notes(rows):
     return notes
 
 
+def _merge_note_sources(*row_sources):
+    """Merge notes by order number, with later sheets taking precedence.
+
+    Empty/default values never replace a note that contains real information.
+    This lets monthly tabs remain editable while keeping the global and archive
+    tabs as fallbacks.
+    """
+    notes = {}
+    for rows in row_sources:
+        for order_key, candidate in _active_notes(rows or []).items():
+            existing = notes.get(order_key)
+            if existing is None:
+                notes[order_key] = candidate
+                continue
+
+            report = candidate["report"]
+            joseph = candidate["joseph"]
+            report_is_real = report and not _key(report).startswith(_key(NO_REPORT_NOTE))
+            joseph_is_real = joseph and joseph != NO_JOSEPH_NOTE
+            existing_report_is_real = (
+                existing["report"]
+                and not _key(existing["report"]).startswith(_key(NO_REPORT_NOTE))
+            )
+            existing_joseph_is_real = (
+                existing["joseph"] and existing["joseph"] != NO_JOSEPH_NOTE
+            )
+
+            if report_is_real or not existing_report_is_real:
+                existing["report"] = report or NO_REPORT_NOTE
+            if joseph_is_real or not existing_joseph_is_real:
+                existing["joseph"] = joseph or NO_JOSEPH_NOTE
+            if report_is_real or joseph_is_real:
+                existing["row"] = candidate["row"]
+    return notes
+
+
 def _normalize_existing_archive(rows):
     result = []
     for source in rows[4:]:
@@ -141,9 +177,18 @@ def _normalize_existing_archive(rows):
     return result
 
 
-def build_tracking_payload(forecast, matches, old_active_rows, old_archive_rows, now=None):
+def build_tracking_payload(
+    forecast,
+    matches,
+    old_active_rows,
+    old_archive_rows,
+    now=None,
+    additional_note_rows=None,
+):
     now = pd.Timestamp(now or datetime.now()).normalize()
-    active_notes = _active_notes(old_active_rows)
+    note_sources = [old_archive_rows, old_active_rows]
+    note_sources.extend(additional_note_rows or [])
+    active_notes = _merge_note_sources(*note_sources)
     archive_rows = _normalize_existing_archive(old_archive_rows)
     for archive_row in archive_rows:
         archive_row[0] = _canonical_period(archive_row[0])
@@ -551,8 +596,17 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
     summary_sheet = spreadsheet.worksheet(SUMMARY_SHEET)
     old_active_rows = active_sheet.get_all_values()
 
+    worksheets = spreadsheet.worksheets()
+    month_worksheets = [
+        worksheet for worksheet in worksheets
+        if _is_month_sheet_title(worksheet.title)
+    ]
+    monthly_note_rows = [
+        worksheet.get_all_values() for worksheet in month_worksheets
+    ]
+
     archive_candidates = [
-        worksheet for worksheet in spreadsheet.worksheets()
+        worksheet for worksheet in worksheets
         if worksheet.title.startswith(ARCHIVE_PREFIX)
     ]
     if archive_candidates:
@@ -572,6 +626,7 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
         old_active_rows,
         old_archive_rows,
         now=now,
+        additional_note_rows=monthly_note_rows,
     )
     subtitle = f"Mise a jour facturation du {payload['updated_at']}"
     _write_tracking_worksheet(
@@ -581,7 +636,6 @@ def sync_tracking_spreadsheet(forecast, matches, config, now=None):
         payload["active_rows"],
     )
 
-    worksheets = spreadsheet.worksheets()
     month_sheets = {
         _key(worksheet.title): worksheet
         for worksheet in worksheets

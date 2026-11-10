@@ -195,6 +195,72 @@ class TrackingPayloadTests(unittest.TestCase):
             "Mois commercial", "CA restant non pose HT", "CA facture recemment HT",
         ])
 
+    def test_month_sheet_notes_override_global_notes(self):
+        forecast = pd.DataFrame([{
+            "order_key": "CD001", "order_no": "CD001",
+            "source_period": "Janvier 2026", "client_ref": "Client",
+            "product_category": "MEN", "status": "Pose possible",
+            "amount_ht": 100.0, "sale_date": "2026-01-10",
+            "earliest_install_date": "2026-03-10", "agency": "HARFLEUR",
+            "sellers": "Vendeur", "classification_source": "Reference affaire",
+            "classification_confidence": "MOYENNE", "is_installed": False,
+        }])
+        global_rows = [
+            ["TITLE"], ["SUBTITLE"], [], ["headers"],
+            ["Janvier 2026", "CD001"] + [""] * 10
+            + ["Ancienne note", "Ancienne remarque Joseph"],
+        ]
+        month_rows = [
+            ["TITLE"], ["SUBTITLE"], [], ["headers"],
+            ["Janvier 2026", "CD001"] + [""] * 10
+            + ["Note corrigee dans janvier", "Remarque Joseph corrigee"],
+        ]
+
+        payload = build_tracking_payload(
+            forecast,
+            pd.DataFrame(),
+            global_rows,
+            [],
+            now="2026-11-10",
+            additional_note_rows=[month_rows],
+        )
+
+        self.assertEqual(payload["active_rows"][0][12], "Note corrigee dans janvier")
+        self.assertEqual(payload["active_rows"][0][13], "Remarque Joseph corrigee")
+
+    def test_default_month_values_do_not_erase_real_global_notes(self):
+        forecast = pd.DataFrame([{
+            "order_key": "CD001", "order_no": "CD001",
+            "source_period": "Janvier 2026", "client_ref": "Client",
+            "product_category": "MEN", "status": "Pose possible",
+            "amount_ht": 100.0, "sale_date": "2026-01-10",
+            "earliest_install_date": "2026-03-10", "agency": "HARFLEUR",
+            "sellers": "Vendeur", "classification_source": "Reference affaire",
+            "classification_confidence": "MOYENNE", "is_installed": False,
+        }])
+        global_rows = [
+            ["TITLE"], ["SUBTITLE"], [], ["headers"],
+            ["Janvier 2026", "CD001"] + [""] * 10
+            + ["Note a conserver", "Question a conserver"],
+        ]
+        month_rows = [
+            ["TITLE"], ["SUBTITLE"], [], ["headers"],
+            ["Janvier 2026", "CD001"] + [""] * 10
+            + ["Aucune note retrouvee dans le rapport", "-"],
+        ]
+
+        payload = build_tracking_payload(
+            forecast,
+            pd.DataFrame(),
+            global_rows,
+            [],
+            now="2026-11-10",
+            additional_note_rows=[month_rows],
+        )
+
+        self.assertEqual(payload["active_rows"][0][12], "Note a conserver")
+        self.assertEqual(payload["active_rows"][0][13], "Question a conserver")
+
 
 class WorksheetLookupTests(unittest.TestCase):
     def test_tracking_sheet_is_written_with_one_update_request(self):
