@@ -484,7 +484,7 @@ def infer_unmatched_invoice_status(invoice):
     return "Facture non rapprochée"
 
 
-def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
+def _find_unassigned_invoice_matches(remaining_orders, unmatched_invoices):
     columns = [
         "invoice_no", "invoice_order_no", "invoice_date", "invoice_client",
         "invoice_amount_ht", "candidate_order_no", "candidate_client",
@@ -686,6 +686,227 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
         ["confidence", "amount_difference_ht"],
         ascending=[True, True],
     ).reset_index(drop=True)
+
+
+def _potential_client_key(value):
+    tokens = normalize_text(value).split()
+    count = 2 if tokens and tokens[0] in {"LE", "LA", "LES", "DE", "DU", "DES"} else 1
+    return " ".join(tokens[:count])
+
+
+def _potential_reference_tokens(value):
+    tokens = normalize_text(value).split()
+    client_count = len(_potential_client_key(value).split())
+    ignored = {
+        "DEVIS", "ENSEMBLE", "PLUS", "VALUE", "ET", "DE", "DES", "DU", "LA", "LE",
+        "LES", "AVEC", "POUR", "FOURNITURE", "POSE", "TEST", "PAYE", "PAIE",
+    }
+    return {token for token in tokens[client_count:] if len(token) >= 3 and token not in ignored}
+
+
+def _potential_suggestion(invoice_rows, candidate_orders, assigned_by_invoice, kind, reason):
+    invoice_amount = sum(float(row["amount_ht"]) for row in invoice_rows)
+    order_amount = sum(float(row["amount_ht"]) for row in candidate_orders)
+    order_keys = list(dict.fromkeys(clean_text(row["order_key"]) for row in candidate_orders))
+    existing_orders = {
+        clean_text(row["order_key"]): row
+        for invoice in invoice_rows
+        for row in assigned_by_invoice.get(clean_text(invoice["invoice_no"]), [])
+    }
+    difference = abs(invoice_amount - order_amount)
+    reason += f" \u00c9cart de montant : {difference:.2f} \u20ac HT. Validation manuelle requise."
+    # Each invoice keeps its existing links when a reviewer adds this proposal.
+    validation_matches = {
+        clean_text(invoice["invoice_no"]): list(dict.fromkeys([
+            *(clean_text(row["order_key"]) for row in assigned_by_invoice.get(
+                clean_text(invoice["invoice_no"]), []
+            )),
+            *order_keys,
+        ]))
+        for invoice in invoice_rows
+    }
+    return {
+        "invoice_no": " / ".join(clean_text(row["invoice_no"]) for row in invoice_rows),
+        "invoice_order_no": " / ".join(clean_text(row.get("order_no")) or "Sans num\u00e9ro" for row in invoice_rows),
+        "invoice_date": max(row["invoice_date"] for row in invoice_rows),
+        "invoice_client": " / ".join(clean_text(row["client_ref"]) for row in invoice_rows),
+        "invoice_amount_ht": invoice_amount,
+        "candidate_order_no": " + ".join(clean_text(row.get("order_no")) or row["order_key"] for row in candidate_orders),
+        "candidate_client": " + ".join(clean_text(row["client_ref"]) for row in candidate_orders),
+        "candidate_amount_ht": order_amount,
+        "amount_difference_ht": difference,
+        "confidence": "MOYENNE",
+        "matching_clues": (
+            "M\u00eame client principal et vendeur commun ; "
+            + " ; ".join(
+                f"{row['invoice_no']} : {float(row['amount_ht']):.2f} \u20ac le "
+                f"{row['invoice_date'].strftime('%d/%m/%Y')}"
+                for row in invoice_rows
+            )
+        ),
+        "non_match_reason": reason,
+        "candidate_order_keys": "|".join(order_keys),
+        "potential_kind": kind,
+        "existing_order_no": " + ".join(
+            clean_text(row.get("order_no")) or key for key, row in existing_orders.items()
+        ),
+        "validation_matches": validation_matches,
+    }
+
+
+def find_potential_invoice_matches(remaining_orders, invoices, matched_orders=None):
+    """Suggest reviews from document data only; never change installed status."""
+    empty = _find_unassigned_invoice_matches(pd.DataFrame(), pd.DataFrame())
+    columns = [*empty.columns, "potential_kind", "existing_order_no", "validation_matches"]
+    if remaining_orders.empty or invoices.empty:
+        return pd.DataFrame(columns=columns)
+
+    orders = remaining_orders.copy()
+    if "is_installed" in orders.columns:
+        orders = orders[~orders["is_installed"]].copy()
+    orders["sale_date"] = pd.to_datetime(orders["sale_date"], errors="coerce")
+    orders["amount_ht"] = pd.to_numeric(orders["amount_ht"], errors="coerce").fillna(0.0)
+    orders = orders[orders["amount_ht"] > 0].copy()
+    orders["potential_client_key"] = orders["client_ref"].map(_potential_client_key)
+
+    final_invoices = ensure_invoice_flags(invoices)
+    final_invoices["invoice_date"] = pd.to_datetime(final_invoices["invoice_date"], errors="coerce")
+    final_invoices["amount_ht"] = pd.to_numeric(final_invoices["amount_ht"], errors="coerce").fillna(0.0)
+    final_invoices = final_invoices[
+        ~final_invoices["is_deposit"] & (final_invoices["amount_ht"] > 0)
+        & final_invoices["invoice_date"].notna()
+    ].drop_duplicates("invoice_no", keep="last").copy()
+    if "is_credit" in final_invoices.columns:
+        final_invoices = final_invoices[~final_invoices["is_credit"].fillna(False).astype(bool)]
+    if orders.empty or final_invoices.empty:
+        return pd.DataFrame(columns=columns)
+    final_invoices["potential_client_key"] = final_invoices["client_ref"].map(_potential_client_key)
+    final_invoices["match_status"] = final_invoices.apply(
+        lambda row: clean_text(row.get("match_status")) or infer_unmatched_invoice_status(row), axis=1
+    )
+
+    context = matched_orders if isinstance(matched_orders, pd.DataFrame) else remaining_orders
+    assigned_by_invoice = {}
+    if "is_installed" in context.columns and "invoice_no" in context.columns:
+        for _, row in context[context["is_installed"]].iterrows():
+            for invoice_no in clean_text(row.get("invoice_no")).split(" / "):
+                if invoice_no:
+                    assigned_by_invoice.setdefault(invoice_no, []).append(row)
+
+    unassigned = final_invoices[~final_invoices["invoice_no"].isin(assigned_by_invoice)]
+    suggestions = _find_unassigned_invoice_matches(orders, unassigned).to_dict("records")
+    for suggestion in suggestions:
+        suggestion.update({
+            "potential_kind": "Facture non rapproch\u00e9e",
+            "existing_order_no": "",
+            "validation_matches": {
+                suggestion["invoice_no"]: suggestion["candidate_order_keys"].split("|")
+            },
+        })
+
+    for _, invoice in final_invoices.iterrows():
+        assigned = assigned_by_invoice.get(clean_text(invoice["invoice_no"]), [])
+        if not assigned:
+            continue
+        candidates = orders[
+            orders["potential_client_key"].eq(invoice["potential_client_key"])
+            & orders["sale_date"].notna() & orders["sale_date"].le(invoice["invoice_date"])
+        ]
+        assigned_amount = sum(float(row["amount_ht"]) for row in assigned)
+        for _, order in candidates.iterrows():
+            if not _seller_keys(invoice).intersection(_seller_keys(order)):
+                continue
+            same_reference = normalize_text(order["client_ref"]) == normalize_text(invoice["client_ref"])
+            difference = abs(float(invoice["amount_ht"]) - float(order["amount_ht"]))
+            if same_reference and difference <= max(5.0, float(invoice["amount_ht"]) * 0.25):
+                suggestions.append(_potential_suggestion(
+                    [invoice], [order], assigned_by_invoice, "Remplacement ou doublon possible",
+                    "La facture est d\u00e9j\u00e0 li\u00e9e \u00e0 " + " + ".join(clean_text(row["order_no"]) for row in assigned)
+                    + ". M\u00eame r\u00e9f\u00e9rence, mais num\u00e9ro de commande diff\u00e9rent. "
+                    "V\u00e9rifier si la commande restante est une ancienne version ou un autre chantier.",
+                ))
+            combined_difference = abs(assigned_amount + float(order["amount_ht"]) - float(invoice["amount_ht"]))
+            if combined_difference <= max(5.0, float(invoice["amount_ht"]) * 0.03):
+                suggestions.append(_potential_suggestion(
+                    [invoice], [*assigned, order], assigned_by_invoice, "Regroupement avec dossier d\u00e9j\u00e0 factur\u00e9",
+                    "La facture est d\u00e9j\u00e0 rapproch\u00e9e d'une partie des commandes. Son montant est proche "
+                    "de cette partie plus la commande restante. V\u00e9rifier le d\u00e9tail de la facture avant "
+                    "d'ajouter ce dossier ; les liens existants seront conserv\u00e9s.",
+                ))
+
+    for _, order in orders.iterrows():
+        if pd.isna(order["sale_date"]):
+            continue
+        same_client = final_invoices[
+            final_invoices["potential_client_key"].eq(order["potential_client_key"])
+        ]
+        reference_tokens = _potential_reference_tokens(order["client_ref"])
+        order_key = normalize_text(order["order_key"])
+        pool = []
+        for _, invoice in same_client.iterrows():
+            if not _seller_keys(invoice).intersection(_seller_keys(order)):
+                continue
+            if not reference_tokens.intersection(_potential_reference_tokens(invoice["client_ref"])):
+                continue
+            invoice_key = normalize_text(invoice.get("order_no"))
+            variant = bool(invoice_key.startswith("CD") and re.fullmatch(re.escape(invoice_key) + r"[A-Z]", order_key))
+            pool.append((invoice, variant))
+        has_variant = any(variant for _, variant in pool)
+        # A copied/test order can be dated just after one of its original invoices.
+        eligible = []
+        for invoice, variant in pool:
+            older = invoice["invoice_date"] < order["sale_date"]
+            if older and not (has_variant and invoice["invoice_date"] >= order["sale_date"] - pd.Timedelta(days=31)):
+                continue
+            if infer_unmatched_invoice_status(invoice) == "Vente N-1 pr\u00e9sum\u00e9e" and not (
+                variant and normalize_text(invoice.get("sale_month_label")) == "CH"
+            ):
+                continue
+            eligible.append((invoice, variant, older))
+        eligible.sort(key=lambda item: (not item[1], abs((item[0]["invoice_date"] - order["sale_date"]).days)))
+        best = None
+        for size in range(2, min(4, len(eligible)) + 1):
+            for group in combinations(eligible[:12], size):
+                if has_variant and not any(item[1] for item in group):
+                    continue
+                amount = sum(float(item[0]["amount_ht"]) for item in group)
+                difference = abs(float(order["amount_ht"]) - amount)
+                if difference <= max(5.0, float(order["amount_ht"]) * 0.03):
+                    score = (difference, size)
+                    if best is None or score < best[0]:
+                        best = (score, group)
+        if best is not None:
+            grouped = best[1]
+            reason = (
+                "Plusieurs factures portent sur le m\u00eame client et des travaux cit\u00e9s dans le dossier, "
+                "mais indiquent des num\u00e9ros distincts. Regroupement \u00e0 confirmer sur les documents."
+            )
+            if any(item[1] for item in grouped):
+                reason += " Le num\u00e9ro du dossier comporte un suffixe par rapport \u00e0 une commande factur\u00e9e : copie ou dossier technique possible."
+            if any(item[2] for item in grouped):
+                reason += " Une facture pr\u00e9c\u00e8de la date du dossier copi\u00e9 ; chronologie \u00e0 v\u00e9rifier."
+            suggestions.append(_potential_suggestion(
+                [item[0] for item in grouped], [order], assigned_by_invoice,
+                "Plusieurs factures pour un dossier", reason,
+            ))
+
+    if not suggestions:
+        return pd.DataFrame(columns=columns)
+    result = pd.DataFrame(suggestions, columns=columns)
+    return result.sort_values(["confidence", "amount_difference_ht"]).reset_index(drop=True)
+
+
+def merge_potential_invoice_matches(saved_matches, suggestions):
+    """Apply selected proposals without replacing another invoice's existing links."""
+    result = dict(saved_matches) if isinstance(saved_matches, dict) else {}
+    for suggestion in suggestions:
+        for invoice_no, keys in suggestion.get("validation_matches", {}).items():
+            previous = result.get(invoice_no, [])
+            previous = previous if isinstance(previous, list) else [previous]
+            result[invoice_no] = list(dict.fromkeys(
+                clean_text(key) for key in [*previous, *keys] if clean_text(key)
+            ))
+    return result
 
 
 def build_chantier_forecast(

@@ -5,6 +5,7 @@ import pandas as pd
 from chantier_forecast import (
     build_chantier_forecast,
     find_potential_invoice_matches,
+    merge_potential_invoice_matches,
     is_deposit_reference,
     match_invoices_to_orders,
     normalize_text,
@@ -420,6 +421,143 @@ class InvoiceMatchingTests(unittest.TestCase):
 
         self.assertTrue(matches.empty)
         self.assertEqual(unmatched.iloc[0]["match_status"], "Vente N-1 présumée")
+
+
+class ExtendedPotentialMatchingTests(unittest.TestCase):
+    def proposals(self, orders, invoices):
+        forecast, matches, _ = build_chantier_forecast(
+            pd.DataFrame(orders), pd.DataFrame(invoices), today="2026-11-25"
+        )
+        potential = find_potential_invoice_matches(
+            forecast[~forecast["is_installed"]], pd.DataFrame(invoices), forecast
+        )
+        return potential, forecast, matches
+
+    def test_already_assigned_invoice_suggests_old_dubuc_and_piednoel_orders(self):
+        for client, old_no, new_no, old_amount, new_amount in [
+            ("DUBUC menuiserie", "CDGELL03917", "CDGELL04141", 7488.15, 8056.87),
+            ("PIEDNOEL PORTE D'ENTREE", "CDPRIE04254", "CDPRIE04320", 4586.29, 4142.18),
+        ]:
+            with self.subTest(client=client):
+                old = dict(order_row(old_no, client), amount_ht=old_amount)
+                new = dict(order_row(new_no, client), amount_ht=new_amount)
+                invoice = dict(invoice_row(new_no, client), amount_ht=new_amount)
+                result, forecast, _ = self.proposals([old, new], [invoice])
+                self.assertEqual(len(result), 1)
+                row = result.iloc[0]
+                self.assertEqual(row["candidate_order_no"], old_no)
+                self.assertEqual(row["existing_order_no"], new_no)
+                self.assertIn("doublon", row["potential_kind"])
+                self.assertEqual(set(row["validation_matches"]["FACT_TEST"]), {old_no, new_no})
+                self.assertFalse(bool(forecast.iloc[0]["is_installed"]))
+
+    def test_alexandre_extra_is_suggested_with_already_billed_initial_order(self):
+        main = dict(order_row("CDGELL04273", "ALEXANDRE ISOLATION EXTERIEURE"), amount_ht=23849.33)
+        extra = dict(order_row("CDGELL04613", "ALEXANDRE PLUS VALUE ITE"), amount_ht=8530.82)
+        invoice = dict(invoice_row("CDGELL04612", main["client_ref"]), amount_ht=32701.40)
+        result, forecast, _ = self.proposals([main, extra], [invoice])
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertIn("Regroupement", row["potential_kind"])
+        self.assertAlmostEqual(row["candidate_amount_ht"], 32380.15)
+        self.assertAlmostEqual(row["amount_difference_ht"], 321.25)
+        self.assertEqual(set(row["candidate_order_keys"].split("|")), {"CDGELL04273", "CDGELL04613"})
+        self.assertFalse(bool(forecast.iloc[1]["is_installed"]))
+
+    def papon_documents(self):
+        carport = dict(order_row("CDSCOL04214", "PAPON car port"), amount_ht=27166.25)
+        window = dict(order_row("CDPERT03986", "PAPON fenetre"), amount_ht=4454.98)
+        copy = dict(order_row("CDSCOL04214b", "PAPON car port + fenetre test POUR PAYE", "2026-06-11"), amount_ht=32349.97)
+        first = dict(invoice_row("CDSCOL04214", "PAPON car port", "CH"), invoice_no="FACT04327", amount_ht=27166.25, invoice_date=pd.Timestamp("2026-11-13"))
+        second = dict(invoice_row("CDPERT03986", "PAPON fenetre"), invoice_no="FACT03883", amount_ht=4454.98, invoice_date=pd.Timestamp("2026-06-09"))
+        return [carport, window, copy], [first, second]
+
+    def test_papon_groups_two_invoices_without_using_notes(self):
+        orders, invoices = self.papon_documents()
+        result, forecast, _ = self.proposals(orders, invoices)
+        self.assertEqual(len(result), 1)
+        row = result.iloc[0]
+        self.assertEqual(row["candidate_order_no"], "CDSCOL04214b")
+        self.assertEqual(set(row["validation_matches"]), {"FACT04327", "FACT03883"})
+        self.assertAlmostEqual(row["invoice_amount_ht"], 31621.23)
+        self.assertAlmostEqual(row["amount_difference_ht"], 728.74)
+        self.assertIn("chronologie", row["non_match_reason"])
+        self.assertIn("CDSCOL04214", row["validation_matches"]["FACT04327"])
+        self.assertIn("CDPERT03986", row["validation_matches"]["FACT03883"])
+        self.assertFalse(bool(forecast.iloc[2]["is_installed"]))
+
+    def test_group_validation_uses_real_invoice_numbers_and_keeps_other_links(self):
+        orders, invoices = self.papon_documents()
+        potential, _, _ = self.proposals(orders, invoices)
+        existing = {"FACT_OTHER": ["CD_OTHER"], "FACT04327": ["CD_CUSTOM"]}
+        saved = merge_potential_invoice_matches(existing, potential.to_dict("records"))
+        self.assertEqual(set(saved), {"FACT_OTHER", "FACT04327", "FACT03883"})
+        self.assertEqual(set(saved["FACT04327"]), {"CD_CUSTOM", "CDSCOL04214", "CDSCOL04214B"})
+        self.assertEqual(existing, {"FACT_OTHER": ["CD_OTHER"], "FACT04327": ["CD_CUSTOM"]})
+
+    def test_validating_group_does_not_reopen_previously_installed_orders(self):
+        orders, invoices = self.papon_documents()
+        potential, _, _ = self.proposals(orders, invoices)
+        saved = merge_potential_invoice_matches({}, potential.to_dict("records"))
+        forecast, matches, _ = build_chantier_forecast(
+            pd.DataFrame(orders), pd.DataFrame(invoices), today="2026-11-25",
+            manual_invoice_matches=saved,
+        )
+        self.assertTrue(forecast["is_installed"].all())
+        self.assertEqual(len(matches), 4)
+
+    def test_two_selected_proposals_for_same_invoice_are_merged(self):
+        result = merge_potential_invoice_matches({}, [
+            {"validation_matches": {"FACT1": ["CD1", "CD2"]}},
+            {"validation_matches": {"FACT1": ["CD1", "CD3"]}},
+        ])
+        self.assertEqual(result, {"FACT1": ["CD1", "CD2", "CD3"]})
+
+    def test_notes_do_not_influence_results(self):
+        orders, invoices = self.papon_documents()
+        expected, _, _ = self.proposals(orders, invoices)
+        for order in orders:
+            order.update({"report_note": "annule / facture", "joseph_note": "pose"})
+        actual, _, _ = self.proposals(orders, invoices)
+        pd.testing.assert_frame_equal(expected, actual)
+
+    def test_ebran_other_product_is_not_suggested_even_with_close_amount(self):
+        old = dict(order_row("CD03820", "EBRAN pe fe vr solaire velux"), amount_ht=33080.57)
+        remaining = dict(order_row("CDBOCQ04286", "EBRAN RAVAL ITE RESINE"), amount_ht=33203.79)
+        invoice = dict(invoice_row("CD03820", old["client_ref"]), amount_ht=33080.57)
+        result, _, _ = self.proposals([old, remaining], [invoice])
+        self.assertTrue(result.empty)
+
+    def test_assigned_invoice_requires_a_common_seller(self):
+        old = order_row("CD1", "CLIENT menuiserie")
+        current = order_row("CD2", "CLIENT menuiserie")
+        invoice = invoice_row("CD2", "CLIENT menuiserie")
+        old["seller_1"] = "OTHER SELLER"
+        result, _, _ = self.proposals([old, current], [invoice])
+        self.assertTrue(result.empty)
+
+    def test_deposits_credits_and_empty_inputs_do_not_generate_proposals(self):
+        order = order_row("CD1", "CLIENT fenetre")
+        for invoice in [
+            dict(invoice_row("CD2", "CLIENT acompte fenetre"), is_deposit=True),
+            dict(invoice_row("CD2", "CLIENT fenetre"), amount_ht=-10000),
+            dict(invoice_row("CD2", "CLIENT fenetre"), is_credit=True),
+        ]:
+            with self.subTest(invoice=invoice):
+                self.assertTrue(find_potential_invoice_matches(pd.DataFrame([order]), pd.DataFrame([invoice])).empty)
+        self.assertTrue(find_potential_invoice_matches(pd.DataFrame(), pd.DataFrame()).empty)
+
+    def test_n1_and_dates_are_not_relaxed_without_a_copy_number(self):
+        orders, invoices = self.papon_documents()
+        orders[-1]["order_no"] = orders[-1]["order_key"] = "CD_NEW"
+        result, _, _ = self.proposals(orders, invoices)
+        self.assertTrue(result.empty)
+
+    def test_explicit_old_year_is_not_bundled_even_with_copy_number(self):
+        orders, invoices = self.papon_documents()
+        invoices[0]["sale_month_label"] = "JUIN 25"
+        result, _, _ = self.proposals(orders, invoices)
+        self.assertTrue(result.empty)
 
 
 if __name__ == "__main__":

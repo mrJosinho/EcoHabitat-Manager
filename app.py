@@ -31,6 +31,7 @@ from chantier_forecast import (
     build_chantier_forecast,
     build_orders_from_periods,
     find_potential_invoice_matches,
+    merge_potential_invoice_matches,
     load_facturation_store,
     read_facturation_export,
     replace_facturation_years,
@@ -7041,7 +7042,7 @@ def afficher_prevision_chantiers(tab):
         else:
             deposit_matches = pd.DataFrame()
             final_matches = matches.copy()
-        potential_matches = find_potential_invoice_matches(remaining, unmatched_invoices)
+        potential_matches = find_potential_invoice_matches(remaining, invoices, forecast)
         manual_match_flash = st.session_state.pop("chantier_manual_match_flash", "")
         if manual_match_flash:
             st.success(manual_match_flash)
@@ -7054,13 +7055,19 @@ def afficher_prevision_chantiers(tab):
                 "factures dont le client, l'agence, les dates et le montant ressemblent à une ou "
                 "plusieurs commandes encore présentes."
             )
+            st.caption(
+                "Analyse des commandes et factures uniquement, sans utiliser les notes. "
+                "Les factures d'acompte sont exclues de ces propositions."
+            )
             if potential_matches.empty:
                 st.info("Aucun rapprochement potentiel suffisamment fiable.")
             else:
                 potential_editor = potential_matches.copy()
                 potential_editor.insert(0, "Valider", False)
-                potential_editor = potential_editor.drop(columns=["candidate_order_keys"])
+                potential_editor = potential_editor.drop(columns=["candidate_order_keys", "validation_matches"])
                 potential_editor = potential_editor.rename(columns={
+                    "potential_kind": "Type de contr\u00f4le",
+                    "existing_order_no": "D\u00e9j\u00e0 rapproch\u00e9e de",
                     "confidence": "Confiance",
                     "invoice_no": "N° facture",
                     "invoice_order_no": "N° commande indiqué sur la facture",
@@ -7076,6 +7083,14 @@ def afficher_prevision_chantiers(tab):
                 })
                 edited_potential_matches = st.data_editor(
                     potential_editor,
+                    column_order=[
+                        "Valider", "Dossier(s) candidat(s)", "Commande(s) candidate(s)",
+                        "N\u00b0 facture", "Type de contr\u00f4le", "D\u00e9j\u00e0 rapproch\u00e9e de",
+                        "Montant commande(s) HT", "Montant facture HT", "\u00c9cart HT",
+                        "Pourquoi Manager ne l'a pas rapproch\u00e9",
+                        "Pourquoi le rapprochement semble possible", "Confiance",
+                        "N\u00b0 commande indiqu\u00e9 sur la facture", "Client facture", "Date facture",
+                    ],
                     use_container_width=True,
                     hide_index=True,
                     disabled=[
@@ -7109,13 +7124,10 @@ def afficher_prevision_chantiers(tab):
                         )
                         if not isinstance(saved_matches, dict):
                             saved_matches = {}
-                        for row_index in selected_indexes:
-                            source_row = potential_matches.loc[row_index]
-                            saved_matches[clean_visible(source_row["invoice_no"])] = [
-                                clean_visible(order_key)
-                                for order_key in str(source_row["candidate_order_keys"]).split("|")
-                                if clean_visible(order_key)
-                            ]
+                        saved_matches = merge_potential_invoice_matches(
+                            saved_matches,
+                            potential_matches.loc[selected_indexes].to_dict("records"),
+                        )
                         latest_settings["chantier_manual_invoice_matches"] = saved_matches
                         save_settings(latest_settings)
                         st.session_state["chantier_manual_match_flash"] = (
@@ -7737,7 +7749,11 @@ def afficher_prevision_chantiers(tab):
                 })
                 st.dataframe(n1_display, use_container_width=True, hide_index=True)
 
-        candidate_invoice_numbers = set(potential_matches["invoice_no"]) if not potential_matches.empty else set()
+        candidate_invoice_numbers = {
+            invoice_no
+            for links in potential_matches["validation_matches"]
+            for invoice_no in links
+        } if not potential_matches.empty else set()
         other_ambiguous_invoices = ambiguous_invoices[
             ~ambiguous_invoices["invoice_no"].isin(candidate_invoice_numbers)
         ] if not ambiguous_invoices.empty else ambiguous_invoices
