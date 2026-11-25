@@ -4,6 +4,7 @@ import pandas as pd
 
 from chantier_forecast import (
     build_chantier_forecast,
+    build_orders_from_periods,
     find_potential_invoice_matches,
     merge_potential_invoice_matches,
     is_deposit_reference,
@@ -558,6 +559,137 @@ class ExtendedPotentialMatchingTests(unittest.TestCase):
         invoices[0]["sale_month_label"] = "JUIN 25"
         result, _, _ = self.proposals(orders, invoices)
         self.assertTrue(result.empty)
+
+
+class ForecastInvoiceValuationTests(unittest.TestCase):
+    def test_piednoel_uses_invoice_amount_without_changing_sales_source(self):
+        order = dict(order_row("CDPRIE04254", "PIEDNOEL PORTE D'ENTREE"), amount_ht=4586.29)
+        invoice = dict(invoice_row("CDPRIE04320", order["client_ref"]), amount_ht=4142.18)
+        orders = pd.DataFrame([order])
+        invoices = pd.DataFrame([invoice])
+        orders_before = orders.copy(deep=True)
+        invoices_before = invoices.copy(deep=True)
+
+        forecast, _, _ = build_chantier_forecast(orders, invoices, today="2026-11-25")
+
+        self.assertTrue(forecast.iloc[0]["is_installed"])
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 4142.18)
+        self.assertEqual(forecast.iloc[0]["order_amount_ht"], 4586.29)
+        self.assertEqual(forecast.iloc[0]["amount_adjustment_ht"], -444.11)
+        self.assertEqual(forecast.iloc[0]["amount_basis"], "Facturation")
+        self.assertEqual(forecast.loc[~forecast.is_installed, "amount_ht"].sum(), 0.0)
+        pd.testing.assert_frame_equal(orders, orders_before)
+        pd.testing.assert_frame_equal(invoices, invoices_before)
+
+    def test_unmatched_order_keeps_full_order_amount(self):
+        order = order_row("CD1", "CLIENT fenetre")
+        invoice = invoice_row("CD2", "AUTRE portail")
+        forecast, _, _ = build_chantier_forecast(pd.DataFrame([order]), pd.DataFrame([invoice]))
+        self.assertFalse(forecast.iloc[0]["is_installed"])
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 10000.0)
+        self.assertEqual(forecast.iloc[0]["amount_basis"], "Commande")
+        self.assertEqual(forecast.iloc[0]["amount_adjustment_ht"], 0.0)
+
+    def test_deposit_alone_does_not_reduce_work_remaining(self):
+        order = order_row("CD1", "CLIENT fenetre")
+        deposit = dict(invoice_row("CD1", "CLIENT acompte fenetre"), amount_ht=3000.0)
+        forecast, _, _ = build_chantier_forecast(pd.DataFrame([order]), pd.DataFrame([deposit]))
+        self.assertFalse(forecast.iloc[0]["is_installed"])
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 10000.0)
+        self.assertEqual(forecast.iloc[0]["deposit_invoiced_ht"], 3000.0)
+
+    def test_deposit_and_balance_define_complete_actual_price(self):
+        order = order_row("CD1", "CLIENT fenetre")
+        deposit = dict(invoice_row("CD1", "CLIENT acompte fenetre"), invoice_no="FACT_DEP", amount_ht=3000.0)
+        balance = dict(invoice_row("CD1", "CLIENT fenetre"), invoice_no="FACT_FINAL", amount_ht=6500.0)
+        forecast, _, _ = build_chantier_forecast(pd.DataFrame([order]), pd.DataFrame([deposit, balance]))
+        self.assertTrue(forecast.iloc[0]["is_installed"])
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 9500.0)
+        self.assertEqual(forecast.iloc[0]["amount_adjustment_ht"], -500.0)
+
+    def test_higher_invoice_price_updates_forecast_total_only(self):
+        first = order_row("CD1", "CLIENT fenetre")
+        second = dict(order_row("CD2", "AUTRE portail"), amount_ht=2000.0)
+        orders = pd.DataFrame([first, second])
+        invoice = dict(invoice_row("CD1", first["client_ref"]), amount_ht=12000.0)
+        forecast, _, _ = build_chantier_forecast(orders, pd.DataFrame([invoice]))
+        self.assertEqual(orders.amount_ht.sum(), 12000.0)
+        self.assertEqual(forecast.amount_ht.sum(), 14000.0)
+        self.assertEqual(forecast.loc[~forecast.is_installed, "amount_ht"].sum(), 2000.0)
+        self.assertEqual(forecast.loc[forecast.is_installed, "amount_ht"].sum(), 12000.0)
+
+    def test_group_invoice_is_allocated_once_and_preserves_exact_cents(self):
+        orders = pd.DataFrame([
+            dict(order_row("CD1", "CLIENT portail"), amount_ht=100.0),
+            dict(order_row("CD2", "CLIENT moteur"), amount_ht=100.0),
+            dict(order_row("CD3", "CLIENT cloture"), amount_ht=100.0),
+        ])
+        invoice = dict(invoice_row("CD_UNKNOWN", "CLIENT ensemble"), amount_ht=299.99)
+        forecast, matches, _ = build_chantier_forecast(
+            orders, pd.DataFrame([invoice]), manual_invoice_matches={"FACT_TEST": ["CD3", "CD1", "CD2", "CD2"]}
+        )
+        self.assertEqual(len(matches), 3)
+        self.assertEqual(round(forecast.amount_ht.sum(), 2), 299.99)
+        self.assertEqual(sorted(round(amount * 100) for amount in forecast.amount_ht), [9999, 10000, 10000])
+        self.assertTrue(forecast.amount_basis.str.contains("prorata").all())
+        self.assertTrue((matches.invoice_order_count == 3).all())
+
+    def test_group_deposit_and_balance_are_not_counted_for_each_order(self):
+        orders = pd.DataFrame([
+            dict(order_row("CD1", "CLIENT portail"), amount_ht=6000.0),
+            dict(order_row("CD2", "CLIENT moteur"), amount_ht=4000.0),
+        ])
+        deposit = dict(invoice_row("CD_UNKNOWN", "CLIENT acompte ensemble"), invoice_no="FACT_DEP", amount_ht=2000.0)
+        balance = dict(invoice_row("CD_UNKNOWN", "CLIENT ensemble"), invoice_no="FACT_FINAL", amount_ht=7500.0)
+        forecast, _, _ = build_chantier_forecast(
+            orders, pd.DataFrame([deposit, balance]),
+            manual_invoice_matches={"FACT_DEP": ["CD1", "CD2"], "FACT_FINAL": ["CD1", "CD2"]},
+        )
+        self.assertEqual(forecast.deposit_invoiced_ht.sum(), 2000.0)
+        self.assertEqual(forecast.amount_ht.sum(), 9500.0)
+        self.assertEqual(list(forecast.amount_ht), [5700.0, 3800.0])
+
+    def test_multiple_final_invoices_and_credit_are_counted_once(self):
+        order = order_row("CD1", "CLIENT fenetre")
+        invoices = pd.DataFrame([
+            dict(invoice_row("CD1", order["client_ref"]), invoice_no="FACT1", amount_ht=4000.0),
+            dict(invoice_row("CD1", order["client_ref"]), invoice_no="FACT2", amount_ht=6000.0),
+            dict(invoice_row("CD1", order["client_ref"]), invoice_no="AVOIR1", amount_ht=-500.0),
+        ])
+        forecast, _, _ = build_chantier_forecast(pd.DataFrame([order]), invoices)
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 9500.0)
+
+    def test_source_period_and_seller_commissions_remain_unchanged(self):
+        source = pd.DataFrame([{
+            "client": "PIEDNOEL PORTE D'ENTREE", "doc": "CD1", "date": "2026-06-22",
+            "agence": "HARFLEUR", "vente": 4586.29, "vendeur": "VENDEUR TEST",
+            "commission": 458.63, "remise": 12.5,
+        }])
+        period = {
+            "df_c": source, "df_ok": source.copy(),
+            "df_vendeurs": pd.DataFrame([{"commission": 458.63, "CA": 4586.29}]),
+            "df_agences": pd.DataFrame([{"CA": 4586.29}]),
+            "col_client": "client", "col_doc": "doc", "col_date": "date",
+            "col_agence": "agence", "col_vente": "vente", "col_com1": "vendeur",
+        }
+        before = {key: value.copy(deep=True) for key, value in period.items() if isinstance(value, pd.DataFrame)}
+        orders = build_orders_from_periods([("Juin 2026", period)])
+        invoice = dict(invoice_row("CD1", source.iloc[0]["client"]), amount_ht=4142.18)
+        forecast, _, _ = build_chantier_forecast(orders, pd.DataFrame([invoice]))
+        self.assertEqual(forecast.iloc[0]["amount_ht"], 4142.18)
+        for key, expected in before.items():
+            pd.testing.assert_frame_equal(period[key], expected)
+
+    def test_cancelled_manual_group_restores_original_forecast_values(self):
+        orders = pd.DataFrame([order_row("CD1", "CLIENT portail"), order_row("CD2", "CLIENT fenetre")])
+        invoice = dict(invoice_row("CD_UNKNOWN", "CLIENT ensemble"), amount_ht=19000.0)
+        adjusted, _, _ = build_chantier_forecast(
+            orders, pd.DataFrame([invoice]), manual_invoice_matches={"FACT_TEST": ["CD1", "CD2"]}
+        )
+        self.assertEqual(adjusted.amount_ht.sum(), 19000.0)
+        restored, _, _ = build_chantier_forecast(orders, pd.DataFrame([invoice]))
+        self.assertFalse(restored.is_installed.any())
+        self.assertEqual(restored.amount_ht.sum(), 20000.0)
 
 
 if __name__ == "__main__":

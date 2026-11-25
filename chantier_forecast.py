@@ -785,7 +785,9 @@ def find_potential_invoice_matches(remaining_orders, invoices, matched_orders=No
         lambda row: clean_text(row.get("match_status")) or infer_unmatched_invoice_status(row), axis=1
     )
 
-    context = matched_orders if isinstance(matched_orders, pd.DataFrame) else remaining_orders
+    context = matched_orders.copy() if isinstance(matched_orders, pd.DataFrame) else remaining_orders.copy()
+    if "order_amount_ht" in context.columns:
+        context["amount_ht"] = context["order_amount_ht"]
     assigned_by_invoice = {}
     if "is_installed" in context.columns and "invoice_no" in context.columns:
         for _, row in context[context["is_installed"]].iterrows():
@@ -909,6 +911,44 @@ def merge_potential_invoice_matches(saved_matches, suggestions):
     return result
 
 
+def _allocate_matched_invoice_amounts(orders, invoices, matches):
+    allocated = matches.copy()
+    allocated["allocated_amount_ht"] = 0.0
+    allocated["invoice_order_count"] = 0
+    if allocated.empty:
+        return allocated
+    allocated = allocated.drop_duplicates(["invoice_no", "order_key"], keep="last").copy()
+    source_amounts = orders.get("order_amount_ht", orders["amount_ht"])
+    weights = {
+        clean_text(key): max(int(round(float(amount) * 100)), 0)
+        for key, amount in zip(orders["order_key"], source_amounts)
+    }
+    invoice_amounts = invoices.drop_duplicates("invoice_no", keep="last").set_index("invoice_no")["amount_ht"].to_dict()
+    for invoice_no, group in allocated.groupby("invoice_no", sort=False):
+        total_cents = int(round(float(invoice_amounts.get(invoice_no, group.iloc[0]["invoice_amount_ht"])) * 100))
+        keys = sorted(set(group["order_key"].map(clean_text)))
+        invoice_weights = {key: weights.get(key, 0) for key in keys}
+        if not any(invoice_weights.values()):
+            invoice_weights = {key: 1 for key in keys}
+        total_weight = sum(invoice_weights.values())
+        # Largest remainders preserve the invoice total exactly, including its cents.
+        shares = {
+            key: divmod(abs(total_cents) * weight, total_weight)
+            for key, weight in invoice_weights.items()
+        }
+        cents_by_key = {key: share[0] for key, share in shares.items()}
+        remainder = abs(total_cents) - sum(cents_by_key.values())
+        ranked = sorted(keys, key=lambda key: (-shares[key][1], key))
+        for key in ranked[:remainder]:
+            cents_by_key[key] += 1
+        sign = -1 if total_cents < 0 else 1
+        allocated.loc[group.index, "allocated_amount_ht"] = group["order_key"].map(
+            lambda key: sign * cents_by_key[clean_text(key)] / 100.0
+        )
+        allocated.loc[group.index, "invoice_order_count"] = len(keys)
+    return allocated
+
+
 def build_chantier_forecast(
     orders,
     invoices,
@@ -965,6 +1005,7 @@ def build_chantier_forecast(
                 ~unmatched["invoice_no"].map(clean_text).isin(manual_invoice_numbers)
             ].copy()
 
+    matches = _allocate_matched_invoice_amounts(orders, invoices, matches)
     if not matches.empty:
         if "is_deposit" not in matches.columns:
             matches["is_deposit"] = False
@@ -991,11 +1032,20 @@ def build_chantier_forecast(
         if not deposit_matches.empty else {}
     )
     deposit_amount_map = (
-        deposit_matches.groupby("order_key")["invoice_amount_ht"].sum().to_dict()
+        deposit_matches.groupby("order_key")["allocated_amount_ht"].sum().to_dict()
         if not deposit_matches.empty else {}
+    )
+    invoiced_amount_map = (
+        matches.groupby("order_key")["allocated_amount_ht"].sum().round(2).to_dict()
+        if not matches.empty else {}
+    )
+    grouped_invoice_keys = (
+        set(matches.loc[matches["invoice_order_count"] > 1, "order_key"])
+        if not matches.empty else set()
     )
 
     forecast = orders.copy()
+    forecast["order_amount_ht"] = orders.get("order_amount_ht", orders["amount_ht"])
     forecast["earliest_install_date"] = forecast["sale_date"] + pd.DateOffset(months=int(delivery_months))
     forecast["days_until_eligible"] = (forecast["earliest_install_date"] - today).dt.days
     forecast["invoice_no"] = forecast["order_key"].map(matched_invoice_map).fillna("")
@@ -1005,6 +1055,16 @@ def build_chantier_forecast(
     )
     forecast["has_deposit"] = forecast["deposit_invoice_no"].ne("")
     forecast["is_installed"] = forecast["order_key"].isin(matched_keys)
+    forecast["invoiced_amount_ht"] = forecast["order_key"].map(invoiced_amount_map).fillna(0.0)
+    forecast["amount_ht"] = forecast["order_amount_ht"].where(
+        ~forecast["is_installed"], forecast["invoiced_amount_ht"]
+    )
+    forecast["amount_adjustment_ht"] = (forecast["amount_ht"] - forecast["order_amount_ht"]).round(2)
+    forecast["amount_basis"] = "Commande"
+    forecast.loc[forecast["is_installed"], "amount_basis"] = "Facturation"
+    forecast.loc[
+        forecast["is_installed"] & forecast["order_key"].isin(grouped_invoice_keys), "amount_basis"
+    ] = "Facturation r\u00e9partie au prorata"
     forecast["billing_status"] = "Aucune facture"
     forecast.loc[forecast["has_deposit"], "billing_status"] = "Acompte factur\u00e9"
     forecast.loc[forecast["is_installed"], "billing_status"] = "Factur\u00e9 / pos\u00e9"

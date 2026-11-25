@@ -225,6 +225,10 @@ def build_tracking_payload(
     for _, row in forecast.iterrows():
         displayed = _clean(row.get("order_no")) or _clean(row.get("order_key"))
         forecast_lookup[_key(displayed)] = row
+    for archive_row in archive_rows:
+        current_row = forecast_lookup.get(_key(archive_row[1]))
+        if current_row is not None and current_row.get("is_installed") and "invoiced_amount_ht" in current_row:
+            archive_row[16] = float(current_row["invoiced_amount_ht"])
     match_lookup = {}
     if isinstance(matches, pd.DataFrame) and not matches.empty:
         ordered_matches = matches.copy()
@@ -254,9 +258,9 @@ def build_tracking_payload(
             _clean(old[10]), _clean(old[11]),
             active_notes[order_key]["report"] or NO_REPORT_NOTE,
             active_notes[order_key]["joseph"] or NO_JOSEPH_NOTE,
-            _clean(match.get("invoice_no")),
+            _clean(forecast_row.get("invoice_no")) or _clean(match.get("invoice_no")),
             _date_text(match.get("invoice_date")),
-            float(match.get("invoice_amount_ht", 0.0)),
+            float(forecast_row.get("invoiced_amount_ht", match.get("invoice_amount_ht", 0.0))),
             "Nouvelle depuis la derniere mise a jour",
             now.strftime("%d/%m/%Y"),
         ])
@@ -383,7 +387,7 @@ def _write_archive(worksheet, payload):
         "Ancien etat", "Montant commande HT", "Date document", "Pose possible a partir du",
         "Agence", "Commercial(aux)", "Origine du classement", "Confiance automatique",
         "Note du rapport", "Notes Joseph", "No facture", "Date facture",
-        "Montant facture HT", "Categorie du rapprochement", "Date de retrait",
+        "Montant retenu prevision HT", "Categorie du rapprochement", "Date de retrait",
     ]
     rows = payload["archive_rows"]
     worksheet.batch_clear(["A1:S500"])

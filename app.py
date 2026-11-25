@@ -7312,7 +7312,7 @@ def afficher_prevision_chantiers(tab):
             ].sum()
         )
         comparison_order = [
-            "Commandes confirmées totales",
+            "Commandes valoris\u00e9es (pr\u00e9vision)",
             "Facturation totale",
             "Dont factures d'acompte",
             "Dont facturation N-1",
@@ -7331,7 +7331,7 @@ def afficher_prevision_chantiers(tab):
         comparison_data = pd.DataFrame({
             "Indicateur": comparison_order,
             "Montant HT": [
-                float(orders["amount_ht"].sum()),
+                float(forecast["amount_ht"].sum()),
                 total_invoiced,
                 total_deposit_invoiced,
                 n1_invoiced,
@@ -7376,6 +7376,12 @@ def afficher_prevision_chantiers(tab):
             "Les commandes sans facture se répartissent entre « Attente livraison » et « Pose possible ». "
             "« Dont facturation N-1 » est inclus dans la facturation totale. Celle-ci ne se soustrait donc pas "
             "directement aux commandes de 2026."
+        )
+        st.caption(
+            "Pr\u00e9visions uniquement : montant de commande pour les dossiers non factur\u00e9s ; "
+            "montant factur\u00e9, acompte et solde compris, pour les dossiers rapproch\u00e9s. "
+            "Une facture group\u00e9e est compt\u00e9e une seule fois et r\u00e9partie au prorata des commandes. "
+            "Les chiffres vendeurs restent inchang\u00e9s."
         )
 
         category_stats = (
@@ -7481,7 +7487,7 @@ def afficher_prevision_chantiers(tab):
             forecast.groupby("source_period", as_index=False)
             .agg(
                 **{
-                    "CA vendu": ("amount_ht", "sum"),
+                    "CA de r\u00e9f\u00e9rence": ("amount_ht", "sum"),
                     "CA posé": ("amount_ht", lambda values: float(
                         values[forecast.loc[values.index, "is_installed"]].sum()
                     )),
@@ -7492,8 +7498,8 @@ def afficher_prevision_chantiers(tab):
             .rename(columns={"source_period": "Période commerciale"})
         )
         monthly_install_ratio["Ratio posé %"] = np.where(
-            monthly_install_ratio["CA vendu"] > 0,
-            monthly_install_ratio["CA posé"] / monthly_install_ratio["CA vendu"] * 100,
+            monthly_install_ratio["CA de r\u00e9f\u00e9rence"] > 0,
+            monthly_install_ratio["CA posé"] / monthly_install_ratio["CA de r\u00e9f\u00e9rence"] * 100,
             0.0,
         )
         monthly_install_ratio["_tri"] = monthly_install_ratio["Période commerciale"].map(evp_period_sort_key)
@@ -7510,14 +7516,14 @@ def afficher_prevision_chantiers(tab):
             ),
             y=alt.Y(
                 "Ratio posé %:Q",
-                title="Part du CA vendu déjà posé",
+                title="Part du CA de r\u00e9f\u00e9rence d\u00e9j\u00e0 pos\u00e9",
                 scale=alt.Scale(domain=[0, 100]),
                 axis=alt.Axis(format=".0f", labelExpr="datum.label + ' %'"),
             ),
             tooltip=[
                 alt.Tooltip("Période commerciale:N"),
                 alt.Tooltip("Ratio posé %:Q", format=".1f"),
-                alt.Tooltip("CA vendu:Q", format=",.2f"),
+                alt.Tooltip("CA de r\u00e9f\u00e9rence:Q", format=",.2f"),
                 alt.Tooltip("CA posé:Q", format=",.2f"),
                 alt.Tooltip("Ventes:Q", format="d"),
                 alt.Tooltip("Dossiers posés:Q", format="d"),
@@ -7533,8 +7539,9 @@ def afficher_prevision_chantiers(tab):
         st.markdown("#### Ratio ventes posées par mois")
         st.altair_chart((ratio_chart + ratio_labels).properties(height=330), use_container_width=True)
         st.caption(
-            "Ratio en montant HT : CA des commandes ayant une facture ÷ CA total des commandes de la période. "
-            "Dans cette analyse, une facture signifie que le chantier est posé."
+            "Ratio en montant HT : CA des dossiers pos\u00e9s valoris\u00e9s \u00e0 la facturation "
+            "\u00f7 CA de r\u00e9f\u00e9rence de la p\u00e9riode. Les dossiers encore \u00e0 poser "
+            "restent valoris\u00e9s \u00e0 la commande."
         )
 
         with st.expander("🔎 Contrôler le total par période commerciale", expanded=False):
@@ -7721,11 +7728,27 @@ def afficher_prevision_chantiers(tab):
             n1_invoices = unmatched_invoices[unmatched_invoices["match_status"] == "Vente N-1 présumée"].copy()
             ambiguous_invoices = unmatched_invoices[unmatched_invoices["match_status"] != "Vente N-1 présumée"].copy()
 
-        with st.expander(f"📦 Chantiers posés rapprochés ({len(final_matches)})", expanded=False):
+        with st.expander(f"📦 Chantiers posés rapprochés ({int(forecast['is_installed'].sum())})", expanded=False):
             if final_matches.empty:
                 st.caption("Aucun rapprochement automatique.")
             else:
-                st.dataframe(final_matches, use_container_width=True, hide_index=True)
+                installed_detail = forecast.loc[forecast["is_installed"], [
+                    "client_ref", "order_no", "amount_ht", "order_amount_ht", "amount_adjustment_ht",
+                    "amount_basis", "invoice_no", "deposit_invoice_no", "source_period", "agency", "sellers",
+                ]].rename(columns={
+                    "client_ref": "Client / R\u00e9f\u00e9rence affaire", "order_no": "N\u00b0 commande",
+                    "amount_ht": "Montant retenu pr\u00e9vision HT", "order_amount_ht": "Commande initiale HT",
+                    "amount_adjustment_ht": "Ajustement facturation HT", "amount_basis": "Origine du montant",
+                    "invoice_no": "Facture(s) finale(s)", "deposit_invoice_no": "Facture(s) d'acompte",
+                    "source_period": "P\u00e9riode commerciale", "agency": "Agence", "sellers": "Commercial(aux)",
+                })
+                st.dataframe(
+                    installed_detail, use_container_width=True, hide_index=True,
+                    column_config={
+                        column: st.column_config.NumberColumn(format="%.2f \u20ac")
+                        for column in ["Montant retenu pr\u00e9vision HT", "Commande initiale HT", "Ajustement facturation HT"]
+                    },
+                )
 
         with st.expander(f"Factures d'acompte rapprochées ({len(deposit_matches)})", expanded=False):
             if deposit_matches.empty:

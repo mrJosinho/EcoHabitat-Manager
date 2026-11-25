@@ -48,6 +48,50 @@ class FakeSpreadsheet:
 
 
 class TrackingPayloadTests(unittest.TestCase):
+    def grouped_valuation_data(self):
+        forecast_rows = []
+        old_rows = [["TITLE"], ["SUBTITLE"], [], ["headers"]]
+        for key, quoted, invoiced in [("CD1", 80.0, 60.0), ("CD2", 50.0, 40.0)]:
+            forecast_rows.append({
+                "order_key": key, "order_no": key, "source_period": "Juin 2026",
+                "client_ref": f"CLIENT {key}", "sale_date": pd.Timestamp("2026-06-01"),
+                "earliest_install_date": pd.Timestamp("2026-08-01"), "is_installed": True,
+                "amount_ht": invoiced, "order_amount_ht": quoted, "invoiced_amount_ht": invoiced,
+                "invoice_no": "FACT_GROUP", "product_category": "MEN", "status": "Pose",
+                "agency": "HARFLEUR", "sellers": "Vendeur",
+            })
+            old_rows.append([
+                "Juin 2026", key, f"CLIENT {key}", "MEN", "Pose possible", quoted,
+                "01/06/2026", "01/08/2026", "HARFLEUR", "Vendeur", "Reference", "MOYENNE",
+                "Note rapport", "Note Joseph",
+            ])
+        matches = pd.DataFrame([{
+            "invoice_no": "FACT_GROUP", "invoice_date": "2026-11-20",
+            "invoice_amount_ht": 100.0, "order_key": row["order_key"], "order_no": row["order_no"],
+        } for row in forecast_rows])
+        return pd.DataFrame(forecast_rows), matches, old_rows
+
+    def test_grouped_invoice_is_counted_once_in_shared_forecast_summary(self):
+        forecast, matches, old_active = self.grouped_valuation_data()
+        payload = build_tracking_payload(forecast, matches, old_active, [], now="2026-11-25")
+        self.assertEqual(payload["archive_amount"], 100.0)
+        self.assertEqual(payload["new_archive_amount"], 100.0)
+        self.assertEqual(payload["chart_rows"], [["Juin 2026", 0, 100.0]])
+        self.assertEqual([row[5] for row in payload["archive_rows"]], [80.0, 50.0])
+        self.assertEqual([row[16] for row in payload["archive_rows"]], [60.0, 40.0])
+        self.assertTrue(all(row[12:14] == ["Note rapport", "Note Joseph"] for row in payload["archive_rows"]))
+
+    def test_existing_archive_amounts_are_refreshed_without_changing_notes(self):
+        forecast, matches, old = self.grouped_valuation_data()
+        archive = old[:4] + [row + ["FACT_GROUP", "20/11/2026", 100.0, "Historique", "20/11/2026"] for row in old[4:]]
+        payload = build_tracking_payload(forecast, matches, [], archive, now="2026-11-25")
+        self.assertEqual(payload["archive_amount"], 100.0)
+        self.assertEqual(payload["new_archive_amount"], 0.0)
+        self.assertEqual(payload["new_archive_rows"], [])
+        for before, after in zip(archive[4:], payload["archive_rows"]):
+            self.assertEqual(before[:16], after[:16])
+            self.assertEqual(before[17:], after[17:])
+
     def test_active_order_is_removed_from_archive_after_manual_match_cancel(self):
         forecast = pd.DataFrame([{
             "is_installed": False,
