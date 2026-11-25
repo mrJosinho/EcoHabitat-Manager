@@ -41,6 +41,7 @@ def load_app_functions(*names, overrides=None):
         "pd": pd, "np": np, "unicodedata": unicodedata, "copy": copy, "datetime": datetime,
         "eligible_agency_sales": eligible_agency_sales,
         "agency_sale_breakdown": agency_sale_breakdown,
+        "gerant_name": gerant_name,
         "normalize_commission_columns": normalize_commission_columns,
         "MOIS_FR": ast.literal_eval(months),
         "directeur_result_agences_for_period": lambda name, period: ["HARFLEUR"],
@@ -62,6 +63,48 @@ def load_app_functions(*names, overrides=None):
     module = ast.Module(body=list(selected.values()), type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "app_calculations", "exec"), namespace)
     return namespace
+
+
+class GerantAffairesAccessTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.functions = load_app_functions("can_access_gerant_affaires")
+
+    def test_four_manager_admin_sessions_have_access(self):
+        for name in GERANTS:
+            with self.subTest(name=name):
+                self.assertTrue(self.functions["can_access_gerant_affaires"]({
+                    "nom": name.title(), "role": "admin",
+                }))
+
+    def test_other_administrators_have_no_access(self):
+        for name in ["Administrateur", "AYACHE Adel", "EL GHAZOUANI Nahim", "GELLY Gaetan", ""]:
+            with self.subTest(name=name):
+                self.assertFalse(self.functions["can_access_gerant_affaires"]({
+                    "nom": name, "role": "admin",
+                }))
+
+    def test_non_admin_and_missing_sessions_have_no_access(self):
+        for role in ["vendeur", "directeur_agence", "secretaire", ""]:
+            self.assertFalse(self.functions["can_access_gerant_affaires"]({
+                "nom": "LUCCHINI JOSEPH", "role": role,
+            }))
+        for session in [None, {}, "admin", {"role": "admin"}]:
+            self.assertFalse(self.functions["can_access_gerant_affaires"](session))
+
+    def test_report_and_download_are_inside_the_access_guard(self):
+        tree = ast.parse(Path(__file__).with_name("app.py").read_text(encoding="utf-8-sig"))
+        annual = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "afficher_annuel")
+        guard = next(node for node in ast.walk(annual) if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Call)
+                     and isinstance(node.test.func, ast.Name)
+                     and node.test.func.id == "can_access_gerant_affaires")
+        calls = [node for node in ast.walk(guard) if isinstance(node, ast.Call)]
+        self.assertTrue(any(isinstance(call.func, ast.Name)
+                            and call.func.id == "load_gerant_affaires_cached" for call in calls))
+        self.assertTrue(any(isinstance(call.func, ast.Attribute)
+                            and call.func.attr == "download_button" for call in calls))
 
 
 class AgencySharesTests(unittest.TestCase):

@@ -43,6 +43,7 @@ from agency_source import (
     AGENCY_TOTALS_RULE_VERSION,
     agency_sale_breakdown,
     eligible_agency_sales,
+    gerant_name,
 )
 
 # ====================== CONFIG ======================
@@ -1254,6 +1255,15 @@ def can_access_prevision_chantiers(user_data=None, username=None):
 
     user_name = strip_accents(normalize_key(user_data.get("nom")))
     return is_joseph_admin(user_data, username) or user_name == "PETIT LILIAN"
+
+
+def can_access_gerant_affaires(user_data=None):
+    if not isinstance(user_data, dict):
+        return False
+    return (
+        normalize_key(user_data.get("role")) == "ADMIN"
+        and bool(gerant_name(user_data.get("nom")))
+    )
 
 
 def user_photo_slug(user):
@@ -5616,7 +5626,7 @@ def afficher_annuel(tab):
         with c3:
             card("🏢 CA OK agences annuel", f"{total_agence_ok_annuel:,.2f} €")
 
-        if role == "admin":
+        if can_access_gerant_affaires(user):
             with st.expander(f"Affaires des gérants — {annee_selectionnee} (année complète)"):
                 gerant_affaires = load_gerant_affaires_cached(historique_signature(), annee_selectionnee)
                 if gerant_affaires.empty:
