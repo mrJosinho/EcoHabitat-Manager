@@ -318,6 +318,38 @@ def _safe_label_candidates(invoice, orders):
     return candidates[0][1]
 
 
+def _exact_identity_candidate(invoice, orders):
+    invoice_amount = float(invoice.get("amount_ht", 0.0))
+    invoice_date = pd.to_datetime(invoice.get("invoice_date"), errors="coerce")
+    client_key = normalize_text(invoice.get("client_ref", ""))
+    invoice_sellers = _seller_keys(invoice)
+    if (
+        not client_key
+        or not invoice_sellers
+        or not math.isfinite(invoice_amount)
+        or invoice_amount <= 0
+        or bool(invoice.get("is_credit", False))
+        or clean_text(invoice.get("invoice_no", "")).upper().startswith("AVOIR")
+        or pd.isna(invoice_date)
+    ):
+        return None
+
+    # An agency mismatch needs exact identity and cents, not fuzzy label scoring.
+    candidates = []
+    for _, order in orders[orders["client_key"] == client_key].iterrows():
+        order_amount = float(order.get("amount_ht", 0.0))
+        sale_date = pd.to_datetime(order.get("sale_date"), errors="coerce")
+        if (
+            math.isfinite(order_amount)
+            and round(order_amount, 2) == round(invoice_amount, 2)
+            and invoice_sellers.intersection(_seller_keys(order))
+            and pd.notna(sale_date)
+            and sale_date <= invoice_date
+        ):
+            candidates.append(order)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def match_invoices_to_orders(orders, invoices):
     if orders.empty:
         unmatched = invoices.copy()
@@ -353,10 +385,15 @@ def match_invoices_to_orders(orders, invoices):
                         fallback_candidates["sale_date"].notna()
                         & (fallback_candidates["sale_date"] <= invoice.get("invoice_date"))
                     ]
-                if inferred_status != "Vente N-1 présumée" and len(fallback_candidates) == 1:
-                    selected = fallback_candidates.iloc[0]
-                    confidence = "Libellé exact (n° commande différent)"
-                else:
+                selected = None
+                if inferred_status != "Vente N-1 présumée":
+                    if len(fallback_candidates) == 1:
+                        selected = fallback_candidates.iloc[0]
+                        confidence = "Libellé exact (n° commande différent)"
+                    else:
+                        selected = _exact_identity_candidate(invoice, orders)
+                        confidence = "Client + montant + vendeur (toutes agences)"
+                if selected is None:
                     row = invoice.to_dict()
                     row["match_status"] = (
                         inferred_status
@@ -376,14 +413,16 @@ def match_invoices_to_orders(orders, invoices):
                 selected = None
                 if unmatched_status != "Vente N-1 présumée":
                     selected = _safe_label_candidates(invoice, orders)
+                    confidence = "Composite libellé"
+                    if selected is None:
+                        selected = _exact_identity_candidate(invoice, orders)
+                        confidence = "Client + montant + vendeur (toutes agences)"
                 if selected is None:
                     row = invoice.to_dict()
                     row["match_status"] = unmatched_status
                     row["matched_order_key"] = ""
                     unmatched_rows.append(row)
                     continue
-                confidence = "Composite libellé"
-
             elif len(candidates) == 1:
                 selected = candidates.iloc[0]
                 confidence = "Automatique"
@@ -494,13 +533,22 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
         invoice_amount = abs(float(invoice.get("amount_ht", 0.0)))
         surname_key = normalize_text(invoice.get("client_ref", "")).split(" ")[0]
         agency_key = normalize_text(invoice.get("agency", ""))
+        invoice_sellers = _seller_keys(invoice)
         if len(surname_key) < 4 or invoice_amount <= 0:
             continue
 
-        candidates = orders[
-            (orders["surname_key"] == surname_key)
-            & (orders["agency_key"] == agency_key)
-        ].copy()
+        candidates = orders[orders["surname_key"] == surname_key].copy()
+        if not candidates.empty:
+            cross_agency_clues = candidates.apply(
+                lambda order: bool(invoice_sellers.intersection(_seller_keys(order)))
+                and label_similarity(
+                    invoice.get("client_ref", ""), order.get("client_ref", "")
+                ) >= 0.65,
+                axis=1,
+            )
+            candidates = candidates[
+                candidates["agency_key"].eq(agency_key) | cross_agency_clues
+            ]
         if pd.notna(invoice_date):
             candidates = candidates[
                 candidates["sale_date"].notna()
@@ -582,15 +630,36 @@ def find_potential_invoice_matches(remaining_orders, unmatched_invoices):
         elif invoice_order_no:
             non_match_reason = (
                 f"Le n° de commande de la facture ({invoice_order_no}) diffère de la commande "
-                f"candidate ({candidate_order_numbers}) et le libellé client n'est pas strictement identique."
+                f"candidate ({candidate_order_numbers})."
             )
         else:
             non_match_reason = (
-                "La facture ne contient aucun n° de commande exploitable et le libellé client "
-                "n'est pas strictement identique."
+                "La facture ne contient aucun n° de commande exploitable."
+            )
+        if not best["is_group"]:
+            if normalize_text(invoice.get("client_ref")) != normalize_text(
+                best["orders"][0].get("client_ref")
+            ):
+                non_match_reason += " Le libell\u00e9 client n'est pas strictement identique."
+            if round(invoice_amount, 2) != round(best["amount"], 2):
+                non_match_reason += " Le montant n'est pas identique au centime."
+        same_agency = all(
+            normalize_text(order.get("agency")) == agency_key for order in best["orders"]
+        )
+        agency_clue = "m\u00eame agence"
+        if not same_agency:
+            order_agencies = " / ".join(sorted({
+                clean_text(order.get("agency")) for order in best["orders"]
+            }))
+            agency_clue = (
+                f"agence diff\u00e9rente ({clean_text(invoice.get('agency'))} / {order_agencies})"
+            )
+            non_match_reason += (
+                f" Agence diff\u00e9rente : facture {clean_text(invoice.get('agency'))}, "
+                f"commande {order_agencies}."
             )
         matching_clues = (
-            f"Même client principal et même agence ; écart de {best['difference']:.2f} € HT "
+            f"M\u00eame client principal ; {agency_clue} ; écart de {best['difference']:.2f} € HT "
             f"({best['difference_ratio'] * 100:.2f} %)."
         )
         suggestions.append({
@@ -632,12 +701,9 @@ def build_chantier_forecast(
         manual_invoice_matches if isinstance(manual_invoice_matches, dict) else {}
     )
     manual_rows = []
-    automatic_invoice_numbers = (
-        set(matches["invoice_no"].map(clean_text)) if not matches.empty else set()
-    )
     for invoice_no, order_keys in manual_invoice_matches.items():
         invoice_no = clean_text(invoice_no)
-        if not invoice_no or invoice_no in automatic_invoice_numbers:
+        if not invoice_no:
             continue
         if not isinstance(order_keys, list):
             order_keys = [order_keys]
@@ -667,8 +733,12 @@ def build_chantier_forecast(
                 "confidence": "Validation manuelle",
             })
     if manual_rows:
-        matches = pd.concat([matches, pd.DataFrame(manual_rows)], ignore_index=True)
         manual_invoice_numbers = {row["invoice_no"] for row in manual_rows}
+        if not matches.empty:
+            matches = matches[
+                ~matches["invoice_no"].map(clean_text).isin(manual_invoice_numbers)
+            ].copy()
+        matches = pd.concat([matches, pd.DataFrame(manual_rows)], ignore_index=True)
         if not unmatched.empty:
             unmatched = unmatched[
                 ~unmatched["invoice_no"].map(clean_text).isin(manual_invoice_numbers)
