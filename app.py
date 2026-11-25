@@ -39,6 +39,11 @@ from chantier_forecast import (
 )
 from chantier_google_sheet import google_sheet_config, sync_tracking_spreadsheet
 from commission_source import normalize_commission_columns
+from agency_source import (
+    AGENCY_TOTALS_RULE_VERSION,
+    agency_sale_breakdown,
+    eligible_agency_sales,
+)
 
 # ====================== CONFIG ======================
 
@@ -2014,6 +2019,10 @@ def recompute_df_agences_attente(df_agences, df_ok, df_c, key_cols, col_client, 
             col_catalogue
         )
 
+        amount_columns = [col_ca_magasin, col_vente, col_catalogue, col_rem]
+        ok_detail = eligible_agency_sales(ok_detail, colonnes_commerciaux, amount_columns)
+        attente_detail = eligible_agency_sales(attente_detail, colonnes_commerciaux, amount_columns)
+
         ca_ok = sum_numeric_col(ok_detail, col_ca_magasin)
         ca_attente = sum_numeric_col(attente_detail, col_ca_magasin)
         total_catalogue = sum_numeric_col(ok_detail, col_catalogue)
@@ -2467,6 +2476,7 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
         axis=1
     )
 
+    detail = agency_sale_breakdown(detail, colonnes_commerciaux, col_ca_magasin)
     cols_show = [
         col_client,
         "Commerciaux",
@@ -2475,6 +2485,8 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
         "Statut",
         col_agence,
         col_ca_magasin,
+        "agency_amount_ht",
+        "manager_amount_ht",
         col_vente,
         col_catalogue,
         col_rem,
@@ -2483,7 +2495,7 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
     cols_show = list(dict.fromkeys([c for c in cols_show if c and c in detail.columns]))
     detail_affichage = detail[cols_show].copy()
 
-    for c in [col_ca_magasin, col_vente, col_catalogue, col_rem]:
+    for c in [col_ca_magasin, col_vente, col_catalogue, col_rem, "agency_amount_ht", "manager_amount_ht"]:
         if c and c in detail_affichage.columns:
             detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
 
@@ -2501,7 +2513,10 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
         "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
     }
 
-    return detail_affichage, metrics
+    return detail_affichage.rename(columns={
+        "agency_amount_ht": "CA retenu agence HT",
+        "manager_amount_ht": "Part gerants exclue HT",
+    }), metrics
 
 
 def make_pdf_zip(items):
@@ -3748,9 +3763,55 @@ def is_periode_comptable_annuelle(periode, annee_selectionnee, use_m2=True):
 
 
 def historique_signature():
-    return tuple(
+    files = tuple(
         sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in HISTORIQUE_DIR.glob("*.pkl"))
     )
+    return AGENCY_TOTALS_RULE_VERSION, files
+
+
+def build_gerant_affaires_for_period(period_data, periode):
+    sellers = [period_data.get(f"col_com{i}") for i in (1, 2, 3)]
+    col_amount = period_data.get("col_ca_magasin")
+    ok_detail = period_data.get("df_ok", pd.DataFrame()).copy()
+    attente_detail = remove_attente_already_ok(
+        ok_detail,
+        period_data.get("df_c", pd.DataFrame()),
+        period_data.get("key_cols", []),
+        period_data.get("col_client"),
+        period_data.get("col_agence"),
+        period_data.get("col_vente"),
+        col_amount,
+        period_data.get("col_catalogue"),
+    ).copy()
+    rows = []
+    for detail, status in [(ok_detail, "OK"), (attente_detail, "En attente")]:
+        breakdown = agency_sale_breakdown(detail, sellers, col_amount)
+        for _, row in breakdown[breakdown["gerants"].ne("")].iterrows():
+            rows.append({
+                "Période": periode,
+                "Client / Référence affaire": clean_visible(row.get(period_data.get("col_client"))),
+                "N° document": clean_visible(row.get(period_data.get("col_doc"))),
+                "Agence": clean_visible(row.get(period_data.get("col_agence"))),
+                "Statut": status,
+                "Gérants": row["gerants"],
+                "Commerciaux": list_commerciaux_row(row, sellers),
+                "Montant affaire HT": to_float(row.get(col_amount)),
+                "Part gérants exclue HT": row["manager_amount_ht"],
+                "CA retenu agence HT": row["agency_amount_ht"],
+            })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(show_spinner=False, max_entries=2, ttl=1800)
+def load_gerant_affaires_cached(signature, year):
+    frames = []
+    for periode in sorted(list_periodes(), key=periode_sort_key):
+        if periode_to_month_year(periode)[1] != year:
+            continue
+        period_data = load_periode(periode)
+        if period_data:
+            frames.append(build_gerant_affaires_for_period(period_data, periode))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False, max_entries=2, ttl=1800)
@@ -4680,6 +4741,8 @@ if role == "admin":
             col_ca_magasin,
             col_catalogue,
             col_rem,
+            col_op,
+            colonnes_commerciaux,
         )
 
         # ====================== DIRECTEURS ======================
@@ -5552,6 +5615,21 @@ def afficher_annuel(tab):
 
         with c3:
             card("🏢 CA OK agences annuel", f"{total_agence_ok_annuel:,.2f} €")
+
+        if role == "admin":
+            with st.expander(f"Affaires des gérants — {annee_selectionnee} (année complète)"):
+                gerant_affaires = load_gerant_affaires_cached(historique_signature(), annee_selectionnee)
+                if gerant_affaires.empty:
+                    st.info("Aucune affaire de gérant trouvée pour cette année.")
+                else:
+                    st.metric("Part gérants exclue des agences HT", f"{gerant_affaires['Part gérants exclue HT'].sum():,.2f} €")
+                    st.dataframe(gerant_affaires.round(2), hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "Télécharger les affaires des gérants (CSV)",
+                        gerant_affaires.round(2).to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                        file_name=f"affaires_gerants_{annee_selectionnee}.csv",
+                        mime="text/csv",
+                    )
 
         st.divider()
 
@@ -7821,6 +7899,7 @@ if st.session_state.get("df_vendeurs") is not None:
 
     periode = st.session_state.get("periode", "Mois inconnu")
     indicateurs_cache_key = (
+        AGENCY_TOTALS_RULE_VERSION,
         periode,
         id(st.session_state.df_vendeurs),
         id(st.session_state.get("df_agences", None)),
@@ -8548,6 +8627,7 @@ if st.session_state.get("df_vendeurs") is not None:
                     axis=1
                 )
 
+                detail = agency_sale_breakdown(detail, colonnes_commerciaux, col_ca_magasin)
                 cols_show = [
                     st.session_state.col_client,
                     "Commerciaux",
@@ -8556,6 +8636,8 @@ if st.session_state.get("df_vendeurs") is not None:
                     "Statut",
                     st.session_state.col_agence,
                     st.session_state.col_ca_magasin,
+                    "agency_amount_ht",
+                    "manager_amount_ht",
                     st.session_state.col_vente,
                     st.session_state.col_catalogue,
                     st.session_state.col_rem,
@@ -8569,7 +8651,9 @@ if st.session_state.get("df_vendeurs") is not None:
                     st.session_state.col_ca_magasin,
                     st.session_state.col_vente,
                     st.session_state.col_catalogue,
-                    st.session_state.col_rem
+                    st.session_state.col_rem,
+                    "agency_amount_ht",
+                    "manager_amount_ht",
                 ]:
                     if c and c in detail_affichage.columns:
                         detail_affichage[c] = pd.to_numeric(detail_affichage[c], errors="coerce").fillna(0).round(2)
@@ -8580,6 +8664,10 @@ if st.session_state.get("df_vendeurs") is not None:
                         errors="coerce"
                     ).dt.strftime("%d/%m/%Y").fillna("")
 
+                detail_affichage = detail_affichage.rename(columns={
+                    "agency_amount_ht": "CA retenu agence HT",
+                    "manager_amount_ht": "Part gérants exclue HT",
+                })
                 pdf_metrics = {
                     "CA OK agence": f"{to_float(data.get('ca_ok', 0)):,.2f} EUR",
                     "CA attente agence": f"{to_float(data.get('ca_attente', 0)):,.2f} EUR",
