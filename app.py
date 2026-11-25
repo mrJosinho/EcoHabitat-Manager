@@ -2448,7 +2448,10 @@ def build_detail_vendeur_pdf(vendeur, data, df_ok, df_c, colonnes_commerciaux, k
     return detail_affichage, metrics
 
 
-def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode):
+def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode, user_data=None):
+    if not can_access_gerant_affaires(user_data):
+        return None, None
+
     col_client = cols["client"]
     col_doc = cols["doc"]
     col_date = cols["date"]
@@ -4930,10 +4933,11 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                 ],
             }
 
-            bulk_zip_key = f"sidebar_bulk_pdf_zip_{safe_filename(periode_tools)}"
-            bulk_count_key = f"sidebar_bulk_pdf_count_{safe_filename(periode_tools)}"
+            bulk_pdf_scope = "gerants" if can_access_gerant_affaires(user) else "vendeurs"
+            bulk_zip_key = f"sidebar_bulk_pdf_zip_{bulk_pdf_scope}_{safe_filename(periode_tools)}"
+            bulk_count_key = f"sidebar_bulk_pdf_count_{bulk_pdf_scope}_{safe_filename(periode_tools)}"
 
-            if st.button("📦 Préparer les PDF groupés", key=f"prepare_sidebar_zip_pdf_all_{safe_filename(periode_tools)}"):
+            if st.button("📦 Préparer les PDF groupés", key=f"prepare_sidebar_zip_pdf_all_{bulk_pdf_scope}_{safe_filename(periode_tools)}"):
                 bulk_pdf_items = []
 
                 with st.spinner("Préparation PDF..."):
@@ -4963,7 +4967,7 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                             pdf_bytes
                         ))
 
-                    if not df_agences_tools.empty:
+                    if can_access_gerant_affaires(user) and not df_agences_tools.empty:
                         for _, agence_row in df_agences_tools.sort_values("agence").iterrows():
                             agence_nom = agence_row.get("agence", "")
                             detail_pdf, metrics_pdf = build_detail_agence_pdf(
@@ -4973,7 +4977,8 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                                 st.session_state.df_c.copy(),
                                 st.session_state.key_cols,
                                 pdf_cols,
-                                periode_tools
+                                periode_tools,
+                                user_data=user,
                             )
 
                             if detail_pdf is None:
@@ -5003,7 +5008,7 @@ with st.sidebar.expander("🧰 Outils", expanded=False):
                     st.session_state[bulk_zip_key],
                     f"exports_pdf_{safe_filename(periode_tools)}.zip",
                     "application/zip",
-                    key=f"sidebar_zip_pdf_all_{safe_filename(periode_tools)}",
+                    key=f"sidebar_zip_pdf_all_{bulk_pdf_scope}_{safe_filename(periode_tools)}",
                     on_click="ignore"
                 )
             else:
@@ -8560,6 +8565,9 @@ if st.session_state.get("df_vendeurs") is not None:
                 f"Remise moyenne agence : **{data['remise_pct']} %** | "
                 f"Affaires OK : **{data['nb_ok']}**"
             )
+
+            if not can_access_gerant_affaires(user):
+                return
 
             st.subheader(f"📋 Détail des affaires de l’agence **{agence}**")
 

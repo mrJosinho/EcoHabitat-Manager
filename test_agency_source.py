@@ -68,7 +68,7 @@ def load_app_functions(*names, overrides=None):
 class GerantAffairesAccessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.functions = load_app_functions("can_access_gerant_affaires")
+        cls.functions = load_app_functions("can_access_gerant_affaires", "build_detail_agence_pdf")
 
     def test_four_manager_admin_sessions_have_access(self):
         for name in GERANTS:
@@ -105,6 +105,68 @@ class GerantAffairesAccessTests(unittest.TestCase):
                             and call.func.id == "load_gerant_affaires_cached" for call in calls))
         self.assertTrue(any(isinstance(call.func, ast.Attribute)
                             and call.func.attr == "download_button" for call in calls))
+
+    def test_agency_detail_is_guarded_after_the_totals_and_before_any_details(self):
+        tree = ast.parse(Path(__file__).with_name("app.py").read_text(encoding="utf-8-sig"))
+        agency = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                      and node.name == "afficher_agence")
+        body = agency.body[0].body
+        guard_index = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
+                           and isinstance(node.test, ast.UnaryOp)
+                           and isinstance(node.test.operand, ast.Call)
+                           and isinstance(node.test.operand.func, ast.Name)
+                           and node.test.operand.func.id == "can_access_gerant_affaires")
+        self.assertIsInstance(body[guard_index].body[0], ast.Return)
+        before = ast.Module(body=body[:guard_index], type_ignores=[])
+        after = ast.Module(body=body[guard_index + 1:], type_ignores=[])
+        self.assertTrue(any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                            and call.func.id == "card" for call in ast.walk(before)))
+        self.assertFalse(any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                             and call.func.attr == "download_button" for call in ast.walk(before)))
+        self.assertTrue(any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                            and call.func.attr == "download_button" for call in ast.walk(after)))
+
+    def test_agency_pdf_rejects_unauthorized_sessions_before_reading_any_data(self):
+        for session in [None, {}, {"nom": "AUTRE ADMINISTRATEUR", "role": "admin"},
+                        {"nom": "AYACHE ADEL", "role": "directeur_agence"}]:
+            with self.subTest(session=session):
+                self.assertEqual(self.functions["build_detail_agence_pdf"](
+                    "HARFLEUR", {}, None, None, [], {}, "Janvier 2026", user_data=session,
+                ), (None, None))
+
+    def test_four_managers_can_still_get_agency_pdfs(self):
+        df = pd.DataFrame([sale("A", ["LAVISSE Fabien", "SCOLAN Marc"])])
+        cols = {
+            "client": "Client", "doc": "Doc", "date": None, "agence": "Agence",
+            "vente": "Vente", "ca_magasin": "CA", "catalogue": "Catalogue",
+            "rem": "Remise", "op": "OPC", "commerciaux": SELLERS,
+        }
+        for name in GERANTS:
+            detail, metrics = self.functions["build_detail_agence_pdf"](
+                "HARFLEUR", {}, df, df.iloc[:0], ["Doc"], cols, "Janvier 2026",
+                user_data={"nom": name, "role": "admin"},
+            )
+            self.assertEqual(len(detail), 1)
+            self.assertEqual(detail.iloc[0]["CA retenu agence HT"], 15000)
+            self.assertIn("CA OK agence", metrics)
+
+    def test_bulk_agency_pdf_call_is_guarded_and_has_the_authenticated_user(self):
+        tree = ast.parse(Path(__file__).with_name("app.py").read_text(encoding="utf-8-sig"))
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == "build_detail_agence_pdf"]
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertTrue(any(keyword.arg == "user_data" and isinstance(keyword.value, ast.Name)
+                                and keyword.value.id == "user" for keyword in call.keywords))
+            ancestors = []
+            node = call
+            while node in parents:
+                node = parents[node]
+                ancestors.append(node)
+            self.assertTrue(any(isinstance(node, ast.If)
+                                and "can_access_gerant_affaires(user)" in ast.unparse(node.test)
+                                for node in ancestors))
 
 
 class AgencySharesTests(unittest.TestCase):
