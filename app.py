@@ -41,6 +41,7 @@ from chantier_google_sheet import google_sheet_config, sync_tracking_spreadsheet
 from commission_source import normalize_commission_columns
 from agency_source import (
     AGENCY_TOTALS_RULE_VERSION,
+    agency_detail_rows,
     agency_sale_breakdown,
     eligible_agency_sales,
     gerant_name,
@@ -1266,6 +1267,16 @@ def can_access_gerant_affaires(user_data=None):
     )
 
 
+def can_access_agence_detail(user_data, agence, periode):
+    if can_access_gerant_affaires(user_data):
+        return True
+    if not isinstance(user_data, dict) or user_data.get("role") != "directeur_agence":
+        return False
+    if not clean_visible(agence) or not clean_visible(periode):
+        return False
+    return user_has_agence_for_period(user_data, agence, periode)
+
+
 def user_photo_slug(user):
     user = user if isinstance(user, dict) else {}
     explicit_photo = clean_visible(user.get("photo", ""))
@@ -2449,7 +2460,7 @@ def build_detail_vendeur_pdf(vendeur, data, df_ok, df_c, colonnes_commerciaux, k
 
 
 def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode, user_data=None):
-    if not can_access_gerant_affaires(user_data):
+    if not can_access_agence_detail(user_data, agence, periode):
         return None, None
 
     col_client = cols["client"]
@@ -2481,6 +2492,9 @@ def build_detail_agence_pdf(agence, data, df_ok, df_c, key_cols, cols, periode, 
     attente_detail["Statut"] = "En attente"
     detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
 
+    detail = agency_detail_rows(
+        detail, colonnes_commerciaux, include_gerants=can_access_gerant_affaires(user_data),
+    )
     if detail.empty:
         return None, None
 
@@ -8566,10 +8580,15 @@ if st.session_state.get("df_vendeurs") is not None:
                 f"Affaires OK : **{data['nb_ok']}**"
             )
 
-            if not can_access_gerant_affaires(user):
+            if not can_access_agence_detail(user, agence, periode):
                 return
 
             st.subheader(f"📋 Détail des affaires de l’agence **{agence}**")
+            if not can_access_gerant_affaires(user):
+                st.caption(
+                    "Les dossiers avec un gérant sont masqués. Les cumuls incluent toujours "
+                    "la part des autres vendeurs sur les dossiers partagés."
+                )
 
             df_ok = st.session_state.df_ok.copy()
             df_c = st.session_state.df_c.copy()
@@ -8601,6 +8620,14 @@ if st.session_state.get("df_vendeurs") is not None:
 
             detail = pd.concat([ok_detail, attente_detail], ignore_index=True)
 
+            colonnes_commerciaux = [
+                st.session_state.col_com1,
+                st.session_state.col_com2,
+                st.session_state.col_com3,
+            ]
+            detail = agency_detail_rows(
+                detail, colonnes_commerciaux, include_gerants=can_access_gerant_affaires(user),
+            )
             if not detail.empty:
                 afficher_alerte_hors_periode(detail, col_client, col_doc, col_date, periode)
                 motifs_attente = load_motifs_attente()
@@ -8635,11 +8662,6 @@ if st.session_state.get("df_vendeurs") is not None:
                     axis=1
                 )
 
-                colonnes_commerciaux = [
-                    st.session_state.col_com1,
-                    st.session_state.col_com2,
-                    st.session_state.col_com3
-                ]
                 detail["Commerciaux"] = detail.apply(
                     lambda row: list_commerciaux_row(row, colonnes_commerciaux),
                     axis=1
@@ -8694,7 +8716,8 @@ if st.session_state.get("df_vendeurs") is not None:
                     "Remise moyenne": f"{to_float(data.get('remise_pct', 0)):,.2f} %",
                 }
                 pdf_filename = f"detail_agence_{safe_filename(agence)}_{safe_filename(periode)}.pdf"
-                pdf_cache_key = f"pdf_cache_agence_{safe_filename(agence)}_{safe_filename(periode)}"
+                pdf_scope = "gerants" if can_access_gerant_affaires(user) else "hors_gerants"
+                pdf_cache_key = f"pdf_cache_agence_v2_{pdf_scope}_{safe_filename(agence)}_{safe_filename(periode)}"
                 pdf_container = st.container()
 
                 if pdf_container.button("📄 Préparer PDF agence", key=f"prepare_pdf_agence_{safe_filename(agence)}"):

@@ -2,6 +2,7 @@ import ast
 import copy
 from datetime import datetime
 from pathlib import Path
+import re
 import unicodedata
 import unittest
 
@@ -10,6 +11,7 @@ import pandas as pd
 
 from agency_source import (
     GERANTS,
+    agency_detail_rows,
     agency_sale_breakdown,
     agency_sale_shares,
     eligible_agency_sales,
@@ -39,6 +41,8 @@ def load_app_functions(*names, overrides=None):
                   and any(isinstance(target, ast.Name) and target.id == "MOIS_FR" for target in node.targets))
     namespace = {
         "pd": pd, "np": np, "unicodedata": unicodedata, "copy": copy, "datetime": datetime,
+        "re": re,
+        "agency_detail_rows": agency_detail_rows,
         "eligible_agency_sales": eligible_agency_sales,
         "agency_sale_breakdown": agency_sale_breakdown,
         "gerant_name": gerant_name,
@@ -68,7 +72,9 @@ def load_app_functions(*names, overrides=None):
 class GerantAffairesAccessTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.functions = load_app_functions("can_access_gerant_affaires", "build_detail_agence_pdf")
+        cls.functions = load_app_functions(
+            "can_access_gerant_affaires", "can_access_agence_detail", "build_detail_agence_pdf",
+        )
 
     def test_four_manager_admin_sessions_have_access(self):
         for name in GERANTS:
@@ -115,7 +121,7 @@ class GerantAffairesAccessTests(unittest.TestCase):
                            and isinstance(node.test, ast.UnaryOp)
                            and isinstance(node.test.operand, ast.Call)
                            and isinstance(node.test.operand.func, ast.Name)
-                           and node.test.operand.func.id == "can_access_gerant_affaires")
+                           and node.test.operand.func.id == "can_access_agence_detail")
         self.assertIsInstance(body[guard_index].body[0], ast.Return)
         before = ast.Module(body=body[:guard_index], type_ignores=[])
         after = ast.Module(body=body[guard_index + 1:], type_ignores=[])
@@ -167,6 +173,235 @@ class GerantAffairesAccessTests(unittest.TestCase):
             self.assertTrue(any(isinstance(node, ast.If)
                                 and "can_access_gerant_affaires(user)" in ast.unparse(node.test)
                                 for node in ancestors))
+
+
+class DirectorAgencyDetailTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.functions = load_app_functions("can_access_agence_detail", "build_detail_agence_pdf")
+
+    def test_nahim_only_has_his_period_agencies(self):
+        session = {"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"}
+        allowed = self.functions["can_access_agence_detail"]
+        self.assertTrue(allowed(session, "HARFLEUR", "Octobre 2026"))
+        self.assertTrue(allowed(session, "MAROMME", "Octobre 2026"))
+        self.assertFalse(allowed(session, "YVETOT", "Octobre 2026"))
+        self.assertFalse(allowed(session, "BOURG ACHARD", "Octobre 2026"))
+        self.assertFalse(allowed(session, "MAROMME", "Mai 2026"))
+        self.assertTrue(allowed(session, "MAROMME", "Juin 2026"))
+
+    def test_other_directors_keep_their_own_scope(self):
+        allowed = self.functions["can_access_agence_detail"]
+        adel = {"nom": "AYACHE Adel", "role": "directeur_agence"}
+        self.assertTrue(allowed(adel, "MAROMME", "Mai 2026"))
+        self.assertTrue(allowed(adel, "YVETOT", "Octobre 2026"))
+        self.assertFalse(allowed(adel, "MAROMME", "Octobre 2026"))
+        gaetan = {"nom": "GELLY Gaetan", "role": "directeur_agence"}
+        self.assertTrue(allowed(gaetan, "BOURG ACHARD", "Octobre 2026"))
+        self.assertFalse(allowed(gaetan, "HARFLEUR", "Octobre 2026"))
+
+    def test_configured_director_scope_and_missing_session_are_fail_closed(self):
+        allowed = self.functions["can_access_agence_detail"]
+        configured = {"nom": "NOUVEAU Directeur", "role": "directeur_agence", "agences": "Harfleur; Yvetot"}
+        self.assertTrue(allowed(configured, "yvetot", "Octobre 2026"))
+        self.assertFalse(allowed(configured, "MAROMME", "Octobre 2026"))
+        self.assertFalse(allowed(configured, "", "Octobre 2026"))
+        self.assertFalse(allowed(configured, "HARFLEUR", ""))
+        self.assertFalse(allowed({"role": "directeur_agence"}, "HARFLEUR", "Octobre 2026"))
+        for session in [None, {}, "admin", {"nom": "SCOLAN Marc", "role": "vendeur"},
+                        {"nom": "AUTRE ADMIN", "role": "admin"}, {"role": "secretaire"}]:
+            with self.subTest(session=session):
+                self.assertFalse(allowed(session, "HARFLEUR", "Octobre 2026"))
+
+    def test_director_pdf_hides_solo_and_shared_manager_jobs_for_ok_and_pending(self):
+        columns = list(sale("A", ["SCOLAN Marc"]))
+        ok = pd.DataFrame([
+            sale("solo", ["LUCCHINI Joseph"]),
+            sale("shared", ["SCOLAN Marc", "PETIT Lilian"]),
+            sale("visible_ok", ["SCOLAN Marc"]),
+            sale("other_agency", ["SCOLAN Marc"], agency="YVETOT"),
+        ], columns=columns)
+        pending = pd.DataFrame([
+            sale("shared_pending", ["SCOLAN Marc", "GELLY Gaetan", "LAVISSE Guillaume"]),
+            sale("solo_pending", ["LAVISSE Fabien"]),
+            sale("visible_pending", ["GELLY Gaetan"]),
+        ], columns=columns)
+        originals = [frame.copy(deep=True) for frame in (ok, pending)]
+        cols = {"client": "Client", "doc": "Doc", "date": None, "agence": "Agence", "vente": "Vente",
+                "ca_magasin": "CA", "catalogue": "Catalogue", "rem": "Remise", "op": "OPC", "commerciaux": SELLERS}
+        detail, metrics = self.functions["build_detail_agence_pdf"](
+            "HARFLEUR", {"ca_ok": 45000}, ok, pending, ["Doc"], cols, "Octobre 2026",
+            user_data={"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"},
+        )
+        self.assertEqual(set(detail["Doc"]), {"visible_ok", "visible_pending"})
+        self.assertEqual(set(detail["Statut"]), {"OK", "En attente"})
+        self.assertEqual(metrics["CA OK agence"], "45,000.00 EUR")
+        for original, frame in zip(originals, (ok, pending)):
+            pd.testing.assert_frame_equal(original, frame)
+
+    def test_director_cannot_request_another_agency_pdf(self):
+        self.assertEqual(self.functions["build_detail_agence_pdf"](
+            "YVETOT", {}, None, None, [], {}, "Octobre 2026",
+            user_data={"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"},
+        ), (None, None))
+
+    def test_all_hidden_jobs_return_no_pdf_instead_of_an_empty_private_report(self):
+        df = pd.DataFrame([sale("secret", ["PETIT Lilian", "SCOLAN Marc"])])
+        cols = {"client": "Client", "doc": "Doc", "date": None, "agence": "Agence", "vente": "Vente",
+                "ca_magasin": "CA", "catalogue": "Catalogue", "rem": "Remise", "op": "OPC", "commerciaux": SELLERS}
+        self.assertEqual(self.functions["build_detail_agence_pdf"](
+            "HARFLEUR", {}, df, df.iloc[:0], ["Doc"], cols, "Octobre 2026",
+            user_data={"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"},
+        ), (None, None))
+
+
+class AgencyDetailRowsTests(unittest.TestCase):
+    def test_all_four_managers_and_aliases_are_hidden_in_every_seller_position(self):
+        for manager in [*GERANTS, "Joseph LUCCHIN", "Lilian PETIT"]:
+            for position in range(3):
+                names = ["SCOLAN Marc", "GELLY Gaetan"]
+                names.insert(position, manager)
+                with self.subTest(manager=manager, position=position):
+                    self.assertTrue(agency_detail_rows(pd.DataFrame([sale("secret", names)]), SELLERS).empty)
+
+    def test_ordinary_jobs_keep_their_values_and_null_sellers(self):
+        df = pd.DataFrame([sale("A", ["SCOLAN Marc", "GELLY Gaetan", None]), sale("B", [])])
+        pd.testing.assert_frame_equal(agency_detail_rows(df, SELLERS), df)
+
+    def test_full_view_is_a_copy_and_input_is_never_mutated(self):
+        df = pd.DataFrame([sale("A", ["LAVISSE Guillaume"]), sale("B", ["SCOLAN Marc"])])
+        before = df.copy(deep=True)
+        self.assertEqual(list(agency_detail_rows(df, SELLERS)["Doc"]), ["B"])
+        full = agency_detail_rows(df, SELLERS, include_gerants=True)
+        pd.testing.assert_frame_equal(full, before)
+        full.loc[0, "CA"] = 0
+        pd.testing.assert_frame_equal(df, before)
+
+    def test_missing_commercial_columns_are_not_exposed_to_restricted_views(self):
+        df = pd.DataFrame([{"Client": "Unknown seller", "CA": 20000}])
+        self.assertTrue(agency_detail_rows(df, SELLERS).empty)
+        self.assertTrue(agency_detail_rows(df, None).empty)
+        pd.testing.assert_frame_equal(agency_detail_rows(df, None, include_gerants=True), df)
+        self.assertTrue(agency_detail_rows(df.iloc[:0], SELLERS).empty)
+
+    def test_duplicate_source_indices_are_kept_without_duplicate_or_hidden_rows(self):
+        df = pd.DataFrame([sale("A", ["SCOLAN Marc"]), sale("B", ["PETIT Lilian"])], index=[4, 4])
+        self.assertEqual(list(agency_detail_rows(df, SELLERS)["Doc"]), ["A"])
+
+    def test_shared_seller_share_stays_in_totals_after_the_detail_is_filtered(self):
+        df = pd.DataFrame([sale("solo", ["LUCCHINI Joseph"]),
+                           sale("shared", ["PETIT Lilian", "SCOLAN Marc"]),
+                           sale("visible", ["SCOLAN Marc"])])
+        before = eligible_agency_sales(df, SELLERS, AMOUNTS)["CA"].sum()
+        self.assertEqual(list(agency_detail_rows(df, SELLERS)["Doc"]), ["visible"])
+        self.assertEqual(before, 45000)
+        self.assertEqual(eligible_agency_sales(df, SELLERS, AMOUNTS)["CA"].sum(), before)
+
+
+class AgencyDetailViewTests(unittest.TestCase):
+    def render(self, session, generate_pdf=False):
+        namespace = load_app_functions(
+            "can_access_agence_detail", "agence_mask", "remove_attente_already_ok",
+            "list_commerciaux_row", "safe_filename", "to_float",
+        )
+        rows = [sale("regular", ["SCOLAN Marc"]), sale("solo", ["PETIT Lilian"]),
+                sale("shared", ["SCOLAN Marc", "LAVISSE Guillaume"])]
+        pending = [sale("pending", ["SCOLAN Marc"]), sale("secret_pending", ["LAVISSE Fabien"])]
+        captured = {"tables": [], "pdfs": [], "downloads": [], "alerts": []}
+
+        class State(dict):
+            __getattr__ = dict.__getitem__
+
+        class Surface:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def columns(self, *args):
+                return [self] * 5
+
+            def container(self):
+                return self
+
+            def button(self, *args, **kwargs):
+                return generate_pdf
+
+            def download_button(self, label, payload, *args, **kwargs):
+                captured["downloads"].append(payload)
+
+            def caption(self, *args):
+                pass
+
+            info = subheader = write = caption
+
+        ui = Surface()
+        ui.session_state = State({
+            "df_ok": pd.DataFrame(rows), "df_c": pd.DataFrame(pending),
+            "col_client": "Client", "col_doc": "Doc", "col_date": None,
+            "col_agence": "Agence", "col_vente": "Vente", "col_ca_magasin": "CA",
+            "col_catalogue": "Catalogue", "col_rem": "Remise", "col_op": "OPC",
+            "col_com1": SELLERS[0], "col_com2": SELLERS[1], "col_com3": SELLERS[2],
+            "key_cols": ["Doc"],
+            "pdf_cache_agence_HARFLEUR_Octobre 2026": b"legacy-private-pdf",
+            "pdf_cache_agence_v2_gerants_HARFLEUR_Octobre 2026": b"manager-private-pdf",
+        })
+
+        def make_pdf(title, metrics, frame):
+            captured["pdfs"].append(frame.copy())
+            return b"filtered-pdf"
+
+        namespace.update({
+            "st": ui, "user": session, "role": session["role"], "periode": "Octobre 2026",
+            "df_agences": pd.DataFrame([{"agence": "HARFLEUR", "ca_ok": 45000,
+                                         "ca_attente": 30000, "ca_total": 75000,
+                                         "remise_pct": 9.09, "nb_ok": 2}]),
+            "card": lambda *args: None,
+            "agence_is_result_for_directeur": lambda *args: True,
+            "load_motifs_attente": lambda: {},
+            "make_attente_tracking_key": lambda row, *args: row["Doc"],
+            "afficher_alerte_hors_periode": lambda frame, *args: captured["alerts"].append(frame.copy()),
+            "render_table_with_status_tooltips": lambda frame, **kwargs: captured["tables"].append(frame.copy()),
+            "make_simple_pdf": make_pdf, "is_render_env": lambda: True,
+        })
+        tree = ast.parse(Path(__file__).with_name("app.py").read_text(encoding="utf-8-sig"))
+        view = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                    and node.name == "afficher_agence")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[view], type_ignores=[])),
+                     "agency_view", "exec"), namespace)
+        namespace["afficher_agence"](ui, agence_forced="HARFLEUR")
+        return captured, ui.session_state
+
+    def test_nahim_table_alerts_and_pdf_only_receive_visible_jobs(self):
+        captured, state = self.render({"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"}, True)
+        for kind in ("tables", "pdfs", "alerts"):
+            with self.subTest(kind=kind):
+                self.assertEqual(len(captured[kind]), 1)
+                self.assertEqual(set(captured[kind][0]["Doc"]), {"regular", "pending"})
+        self.assertEqual(captured["downloads"], [b"filtered-pdf"])
+        self.assertEqual(state["pdf_cache_agence_v2_hors_gerants_HARFLEUR_Octobre 2026"], b"filtered-pdf")
+        self.assertEqual(len(state["df_ok"]), 3)
+        self.assertEqual(len(state["df_c"]), 2)
+
+    def test_old_or_full_manager_pdf_cache_is_not_reused_by_directors(self):
+        captured, _ = self.render({"nom": "EL GHAZOUANI Nahim", "role": "directeur_agence"})
+        self.assertEqual(captured["pdfs"], [])
+        self.assertEqual(captured["downloads"], [])
+        self.assertEqual(set(captured["tables"][0]["Doc"]), {"regular", "pending"})
+
+    def test_manager_keeps_full_table_and_pdf(self):
+        captured, state = self.render({"nom": "LUCCHINI Joseph", "role": "admin"}, True)
+        expected = {"regular", "pending", "solo", "shared", "secret_pending"}
+        self.assertEqual(set(captured["tables"][0]["Doc"]), expected)
+        self.assertEqual(set(captured["pdfs"][0]["Doc"]), expected)
+        self.assertEqual(state["pdf_cache_agence_v2_gerants_HARFLEUR_Octobre 2026"], b"filtered-pdf")
+
+    def test_unrelated_director_does_not_receive_table_or_pdf(self):
+        captured, _ = self.render({"nom": "AYACHE Adel", "role": "directeur_agence"}, True)
+        self.assertEqual(captured["tables"], [])
+        self.assertEqual(captured["pdfs"], [])
+        self.assertEqual(captured["downloads"], [])
 
 
 class AgencySharesTests(unittest.TestCase):

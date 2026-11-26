@@ -55,6 +55,19 @@ def eligible_agency_sales(df, seller_columns, amount_columns):
     return out
 
 
+def agency_detail_rows(df, seller_columns, include_gerants=False):
+    """Filter display/export rows only; shared seller totals stay unchanged."""
+    if include_gerants or df.empty:
+        return df.copy()
+    columns = [c for c in dict.fromkeys(seller_columns or []) if c and c in df.columns]
+    if not columns:
+        return df.iloc[0:0].copy()
+    visible = pd.Series(True, index=df.index)
+    for column in columns:
+        visible &= df[column].map(gerant_name).eq("")
+    return df.loc[visible].copy()
+
+
 def agency_sale_breakdown(df, seller_columns, amount_column):
     out = df.copy()
     shares = agency_sale_shares(df, seller_columns)
